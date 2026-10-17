@@ -242,7 +242,7 @@ linters:
       # Default: [ switch ]
       check:
         - switch
-        - map
+        - mapliteral # renamed from "map" in golangci-lint v2.15.0
 
     exhaustruct:
       # List of regular expressions to exclude struct packages and their names from checks.
