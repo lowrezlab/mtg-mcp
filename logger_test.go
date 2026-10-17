@@ -55,6 +55,19 @@ func TestInitLogger(t *testing.T) {
 	}
 }
 
+func TestInitLogger_StderrOnly(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	if err := InitLogger(""); err != nil {
+		t.Fatalf("InitLogger(\"\") error = %v", err)
+	}
+	GetLogger().Info().Msg("test log message")
+
+	if _, err := os.Stat(defaultLogFile); !os.IsNotExist(err) {
+		t.Errorf("InitLogger(\"\") should not create %s, stat err = %v", defaultLogFile, err)
+	}
+}
+
 func TestInitLogger_InvalidPath(t *testing.T) {
 	// Try to create a log file in a non-existent directory without creating it
 	invalidPath := "/nonexistent/directory/that/does/not/exist/test.log"

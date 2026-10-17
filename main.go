@@ -93,8 +93,12 @@ func main() {
 		}
 	}
 
-	// Initialize logger
-	logFilePath := "mtg-commander-server.log"
+	// Initialize logger. LOG_FILE overrides the log file path; set it to "" to log
+	// to stderr only (containers, where the working directory may not be writable).
+	logFilePath := defaultLogFile
+	if v, ok := os.LookupEnv(envLogFile); ok {
+		logFilePath = v
+	}
 	if err := InitLogger(logFilePath); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Failed to initialize logger: %v\n", err)
 		os.Exit(1)
@@ -139,13 +143,8 @@ func main() {
 	mtgServer.registerResources(mcpServer)
 	log.Info().Msg("All resources registered successfully")
 
-	// Start server with stdio transport
-	log.Info().
-		Str("transport", "stdio").
-		Str("log_file", logFilePath).
-		Msg("Starting MTG Commander MCP Server")
-
-	if serveErr := server.ServeStdio(mcpServer); serveErr != nil {
+	// Start server on the transport selected by MCP_TRANSPORT (stdio by default)
+	if serveErr := serve(mcpServer, logFilePath); serveErr != nil {
 		log.Fatal().Err(serveErr).Msg("Server error")
 	}
 }

@@ -315,6 +315,32 @@ This publishes the endpoint on `http://localhost:8080/mcp` (override the port
 with `MTG_MCP_PORT`). The proxy runs in stateful mode, which multi-step tool
 flows require.
 
+### Running over HTTP natively (hosted remote connector)
+
+The binary can also serve Streamable HTTP itself, with no Node or proxy. It is
+configured entirely through environment variables:
+
+| Variable              | Default | Meaning                                                              |
+|-----------------------|---------|----------------------------------------------------------------------|
+| `MCP_TRANSPORT`       | `stdio` | `http` serves Streamable HTTP instead of stdio                       |
+| `PORT`                | `8080`  | HTTP listen port                                                     |
+| `MCP_PATH_SECRET`     | —       | Required. Endpoint becomes `/mcp/<secret>` (24+ chars, `[A-Za-z0-9_-]`) |
+| `MCP_ALLOW_NO_SECRET` | —       | `1` serves an open `/mcp` instead (local testing only)               |
+| `MCP_RATE_LIMIT`      | `5`     | Sustained requests per second across all clients (429 beyond it)     |
+| `MCP_RATE_BURST`      | `20`    | Burst size for the rate limit                                        |
+| `LOG_FILE`            | `mtg-commander-server.log` | Log file path; empty logs to stderr only          |
+
+```bash
+MCP_TRANSPORT=http MCP_PATH_SECRET=$(openssl rand -hex 24) ./mtg-mcp
+```
+
+`GET /healthz` returns `ok`. Every other path returns 404, so the secret path
+acts as the credential: treat the full URL like a password. Sessions are
+stateful and held in memory, so run a single instance (or use sticky sessions).
+
+The `http` Docker target packages this mode, and `fly.toml` deploys it to
+Fly.io as a single always-on machine (see the comments in that file).
+
 ## Example Queries
 
 Once connected to Claude Desktop, you can ask questions like:
