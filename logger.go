@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"time"
 
@@ -12,6 +13,10 @@ const (
 	logLevelInfo  = "info"
 	logLevelWarn  = "warn"
 	logLevelError = "error"
+
+	defaultLogFile = "mtg-commander-server.log"
+	envLogFile     = "LOG_FILE"
+	envNoColor     = "NO_COLOR"
 )
 
 // loggerInstance wraps the zerolog logger for thread-safe access.
@@ -32,24 +37,28 @@ func newLoggerInstance() *loggerInstance {
 
 var loggerHolder = newLoggerInstance() //nolint:gochecknoglobals // logger needs to be accessible throughout the application
 
-// InitLogger initializes the global logger with both console and file output.
+// InitLogger initializes the global logger with console output, plus file output
+// unless logFilePath is empty.
 func InitLogger(logFilePath string) error {
-	// Create log file
-	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return err
-	}
-
-	// Console writer with colors. MUST be stderr: the MCP stdio transport owns
-	// stdout, so any diagnostics on stdout corrupt the JSON-RPC stream.
+	// Console writer with colors (disabled by NO_COLOR). MUST be stderr: the MCP
+	// stdio transport owns stdout, so any diagnostics on stdout corrupt the JSON-RPC stream.
 	consoleWriter := zerolog.ConsoleWriter{
 		Out:        os.Stderr,
 		TimeFormat: time.RFC3339,
-		NoColor:    false,
+		NoColor:    os.Getenv(envNoColor) != "",
 	}
 
-	// Multi-writer: write to both console and file
-	multi := zerolog.MultiLevelWriter(consoleWriter, logFile)
+	writers := []io.Writer{consoleWriter}
+	if logFilePath != "" {
+		logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			return err
+		}
+		writers = append(writers, logFile)
+	}
+
+	// Multi-writer: write to console and, when configured, the file
+	multi := zerolog.MultiLevelWriter(writers...)
 
 	// Create logger
 	loggerHolder.logger = zerolog.New(multi).

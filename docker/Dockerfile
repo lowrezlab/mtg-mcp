@@ -1,23 +1,26 @@
 # syntax=docker/dockerfile:1
 #
 # Optional container image for mtg-mcp. Using Docker is never required — the
-# native `make build` / `./mtg-mcp` flow is unchanged. This Dockerfile has two
+# native `make build` / `./mtg-mcp` flow is unchanged. This Dockerfile has three
 # selectable targets:
 #   * runtime (default) — a tiny distroless image holding just the stdio binary.
 #                         Drive it with `docker run -i --rm` from an MCP client.
+#   * http              — the same binary serving native Streamable HTTP
+#                         (claude.ai connector, hosted deploys).
 #   * proxy             — Node + mcp-proxy wrapping the binary to expose the
 #                         stdio server over Streamable HTTP (claude.ai connector).
 # The build context is the repo root; run these from there:
 #   Build the stdio image:  docker build -f docker/Dockerfile -t mtg-mcp:latest .
+#   Build the HTTP image:   docker build -f docker/Dockerfile --target http -t mtg-mcp:http .
 #   Build the proxy image:  docker build -f docker/Dockerfile --target proxy -t mtg-mcp:proxy .
 # (or just `make docker-build` / `docker compose up`.)
 
 # ---- Builder ----------------------------------------------------------------
-# Pinned to satisfy the `go 1.26.4` directive in go.mod. GOTOOLCHAIN=local turns
+# Pinned to satisfy the `go 1.27.1` directive in go.mod. GOTOOLCHAIN=local turns
 # an unexpected toolchain bump into a hard build failure instead of a silent
 # download. --platform=$BUILDPLATFORM runs the compiler natively (fast) and
 # cross-compiles to TARGETOS/TARGETARCH below, so arm64 hosts get a native image.
-FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine AS builder
 ENV GOTOOLCHAIN=local CGO_ENABLED=0
 WORKDIR /src
 
@@ -58,6 +61,20 @@ EXPOSE 8080
 # tool-call -> resources/read round-trip. Internal port fixed at 8080; remap on
 # the host side. The binary logs to stderr, so mcp-proxy's stdout stays clean.
 ENTRYPOINT ["mcp-proxy", "--port", "8080", "--", "/usr/local/bin/mtg-mcp"]
+
+# ---- HTTP target: native Streamable HTTP, no Node -------------------------------
+# Built explicitly with `--target http`. Serves /mcp/<MCP_PATH_SECRET> and
+# /healthz on $PORT; the server refuses to start without MCP_PATH_SECRET (pass
+# it at runtime as a platform secret, never bake it into the image). Logs go
+# to stderr only (LOG_FILE empty), uncolored for log collectors. Sessions are
+# in-memory: run one instance or use sticky sessions.
+FROM gcr.io/distroless/static-debian12:nonroot AS http
+LABEL org.opencontainers.image.source="https://github.com/nathanmartins/mtg-mcp"
+LABEL org.opencontainers.image.description="MTG Commander MCP server (Streamable HTTP)"
+COPY --from=builder /out/mtg-mcp /usr/local/bin/mtg-mcp
+ENV MCP_TRANSPORT=http PORT=8080 LOG_FILE="" NO_COLOR=1
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/mtg-mcp"]
 
 # ---- Runtime target: pure stdio MCP command (DEFAULT stage = smallest) -------
 FROM gcr.io/distroless/static-debian12:nonroot AS runtime
