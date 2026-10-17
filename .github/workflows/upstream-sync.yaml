@@ -1,0 +1,71 @@
+name: Upstream sync
+
+# Weekly check for new commits on nathanmartins/mtg-mcp main. When there are
+# any, opens a PR from upstream main into this fork's main (one at a time; an
+# open PR keeps updating itself as upstream moves). Nothing is merged
+# automatically: merging the PR is a push to main, which deploys to Fly.
+#
+# The PR head is upstream's own branch, so no workflow-file changes are ever
+# pushed with GITHUB_TOKEN (GitHub forbids that). Creating the PR needs the
+# repo setting "Allow GitHub Actions to create and approve pull requests".
+
+on: # yamllint disable-line rule:truthy
+  workflow_dispatch: # Manual trigger
+  schedule:
+    - cron: '23 14 * * 1' # Mondays 14:23 UTC
+
+permissions:
+  contents: read
+  pull-requests: write
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+jobs:
+  sync:
+    name: Open PR for new upstream commits
+    if: github.repository == 'lowrezlab/mtg-mcp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_OWNER: nathanmartins
+      UPSTREAM_REPO: nathanmartins/mtg-mcp
+
+    steps:
+      - name: Compare main with upstream
+        id: compare
+        run: |
+          ahead=$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${UPSTREAM_OWNER}:main" --jq .ahead_by)
+          echo "Upstream main has ${ahead} commit(s) not in ${GITHUB_REPOSITORY} main"
+          echo "ahead=${ahead}" >> "$GITHUB_OUTPUT"
+
+      - name: Open sync PR
+        if: steps.compare.outputs.ahead != '0'
+        run: |
+          open=$(gh api "repos/${GITHUB_REPOSITORY}/pulls?state=open&base=main&head=${UPSTREAM_OWNER}:main" \
+            --jq length)
+          if [[ "${open}" != "0" ]]; then
+            echo "A sync PR is already open; it updates itself as upstream moves."
+            exit 0
+          fi
+          body=$(cat <<EOF
+          Upstream [${UPSTREAM_REPO}](https://github.com/${UPSTREAM_REPO}) has \
+          ${{ steps.compare.outputs.ahead }} new commit(s) on \`main\`.
+
+          - Merge with **Create a merge commit** (not squash/rebase), so future syncs stay clean.
+          - Merging pushes to \`main\`, which runs the Fly deploy workflow.
+          - If GitHub reports conflicts (most likely in \`main.go\`, \`logger.go\`, \`README.md\` or
+            \`docker/Dockerfile\`, which this fork changes), resolve them locally:
+            \`git fetch upstream && git merge upstream/main\`, then push.
+
+          Opened automatically by the weekly upstream-sync workflow.
+          EOF
+          )
+          gh api "repos/${GITHUB_REPOSITORY}/pulls" \
+            -f base=main \
+            -f head="${UPSTREAM_OWNER}:main" \
+            -f title="Sync upstream ${UPSTREAM_REPO}" \
+            -f body="${body}" \
+            --jq .html_url

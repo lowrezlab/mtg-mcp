@@ -1,0 +1,53 @@
+name: Deploy to Fly
+
+# Tests and deploys the HTTP server to the Fly app in fly.toml on every push to
+# main. Needs a FLY_API_TOKEN repo secret (fly tokens create deploy). Only runs
+# in the lowrezlab fork, so upstream and other forks skip it.
+
+on: # yamllint disable-line rule:truthy
+  workflow_dispatch: # Manual trigger
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -Eeuo pipefail {0}
+
+# Never cancel a deploy halfway; queue the next one instead.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Test and deploy
+    if: github.repository == 'lowrezlab/mtg-mcp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run tests
+        run: go test -short -race ./...
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master@2026-04-08 (node24)
+
+      # --ha=false keeps exactly one machine: MCP sessions are held in memory.
+      - name: Deploy
+        run: flyctl deploy --ha=false --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Health check
+        run: curl -fsS --retry 6 --retry-delay 5 --retry-all-errors https://lowrezlab-mtg-mcp.fly.dev/healthz
