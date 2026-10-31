@@ -136,7 +136,7 @@ information, rulings, pricing, deck validation tools, and multi-platform deck im
 
 3. **get_glossary_term** - Get a Comprehensive Rules glossary definition by term.
 
-#### EDHREC Meta Data (2 tools)
+#### EDHREC Meta Data (4 tools)
 
 1. **get_edhrec_recommendations** – Get EDHREC recommendations for a commander
     - High-synergy cards with synergy scores
@@ -152,6 +152,17 @@ information, rulings, pricing, deck validation tools, and multi-platform deck im
     - Usage statistics and percentages
     - Ranked by popularity
     - Color identity filtering (w/u/b/r/g)
+
+3. **get_edhrec_set_cards** – Get the Commander-relevant cards of a set
+    - New commanders the set introduced, with deck counts
+    - The set's cards with the share of eligible decks playing them
+    - Takes the short set code (e.g. `rna`, `blb`)
+
+4. **get_edhrec_top** – Get EDHREC's most-played commanders or cards
+    - `kind`: `commanders` (default) or `cards`
+    - `period`: `week` (default), `month`, or `year`
+    - Commanders show decks built; cards show share of eligible decks
+    - Up to 100 entries (default 25)
 
 ### Resources (Data Sources)
 

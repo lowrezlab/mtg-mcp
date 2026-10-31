@@ -756,6 +756,48 @@ func TestHandleGetEDHRECSetCards(t *testing.T) {
 	})
 }
 
+func TestHandleGetEDHRECTop(t *testing.T) {
+	t.Run("defaults to weekly commanders", func(t *testing.T) {
+		var gotPath string
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			_ = json.NewEncoder(w).Encode(EDHRECResponse{
+				Header: "Top Commanders",
+				Container: EDHRECContainer{JSONDict: EDHRECData{CardLists: []EDHRECCardList{{
+					Header:    "Past Week",
+					CardViews: []EDHRECCardView{{Name: "Jace, Multiverse Architect", NumDecks: 2986}},
+				}}}},
+			})
+		}))
+		t.Cleanup(ts.Close)
+
+		s := &MTGCommanderServer{edhrecBaseURL: ts.URL}
+		res, err := s.handleGetEDHRECTop(context.Background(), toolRequest(nil))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if gotPath != "/commanders/week.json" {
+			t.Errorf("requested %q, want /commanders/week.json", gotPath)
+		}
+		if !strings.Contains(resultText(t, res), "Jace, Multiverse Architect") {
+			t.Errorf("expected commander in output:\n%s", resultText(t, res))
+		}
+	})
+
+	t.Run("upstream failure", func(t *testing.T) {
+		s := &MTGCommanderServer{edhrecBaseURL: jsonServer(t, http.StatusForbidden, nil)}
+		res, _ := s.handleGetEDHRECTop(context.Background(), toolRequest(map[string]any{
+			"kind": "cards", "period": "year",
+		}))
+		if !res.IsError {
+			t.Error("expected error result")
+		}
+		if !strings.Contains(resultText(t, res), "top cards for the past year") {
+			t.Errorf("expected kind and period in error message:\n%s", resultText(t, res))
+		}
+	})
+}
+
 func TestHandleGetEDHRECRecommendationsThemeHint(t *testing.T) {
 	t.Run("invalid theme suggests the real slug", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

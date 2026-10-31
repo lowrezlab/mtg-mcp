@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -84,4 +85,17 @@ func TestEDHRECHandlerValidation(t *testing.T) {
 			t.Error("expected error for missing colors")
 		}
 	})
+
+	for _, args := range []map[string]any{
+		{"kind": "lands"},
+		{"period": "decade"},
+		{"limit": float64(-1)},
+	} {
+		t.Run(fmt.Sprintf("top rejects %v", args), func(t *testing.T) {
+			res, _ := s.handleGetEDHRECTop(ctx, toolRequest(args))
+			if !res.IsError {
+				t.Errorf("expected error for %v", args)
+			}
+		})
+	}
 }

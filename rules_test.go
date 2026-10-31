@@ -215,8 +215,8 @@ func TestRulesFormatters(t *testing.T) {
 }
 
 func TestRulesCountsAndHandlers(t *testing.T) {
-	if totalToolCount != 20 {
-		t.Errorf("totalToolCount = %d, want 20", totalToolCount)
+	if totalToolCount != 21 {
+		t.Errorf("totalToolCount = %d, want 21", totalToolCount)
 	}
 	if totalResourceCount != 3 {
 		t.Errorf("totalResourceCount = %d, want 3", totalResourceCount)

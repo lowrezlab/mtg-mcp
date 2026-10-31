@@ -456,26 +456,77 @@ func FormatSetCardsForDisplay(page *EDHRECResponse, setCode string, limit int) s
 	return output.String()
 }
 
-// getTopCardsForCategoryWithURL fetches top cards with a custom base URL.
-func getTopCardsForCategoryWithURL(
-	ctx context.Context,
-	category string,
-	page int,
-	baseURL string,
-) ([]EDHRECCardView, error) {
-	// Categories: salt, commanders, themes, etc.
-	reqURL := fmt.Sprintf("%s/top/%s--%d.json", baseURL, url.PathEscape(category), page)
+// EDHREC ranking kinds and periods accepted by get_edhrec_top. Each pair maps to one page:
+// top/<period>.json for cards, commanders/<period>.json for commanders.
+const (
+	topKindCards      = "cards"
+	topKindCommanders = "commanders"
+	topPeriodWeek     = "week"
+	topPeriodMonth    = "month"
+	topPeriodYear     = "year"
+	defaultTopLimit   = 25
+)
 
-	var edhrecResp EDHRECResponse
-	if err := fetchEDHRECPage(ctx, reqURL, "top cards", &edhrecResp); err != nil {
+// topPagePaths maps a ranking kind to its EDHREC path prefix.
+var topPagePaths = map[string]string{ //nolint:gochecknoglobals // fixed lookup table
+	topKindCards:      "top",
+	topKindCommanders: "commanders",
+}
+
+// getTopPageWithURL fetches an EDHREC ranking page for kind over period. EDHREC serves only the
+// unpaged form; top/week--1.json answers 403.
+func getTopPageWithURL(ctx context.Context, kind, period, baseURL string) (*EDHRECResponse, error) {
+	prefix, ok := topPagePaths[kind]
+	if !ok {
+		return nil, fmt.Errorf("unknown ranking kind %q", kind)
+	}
+
+	reqURL := fmt.Sprintf("%s/%s/%s.json", baseURL, prefix, url.PathEscape(period))
+
+	var page EDHRECResponse
+	if err := fetchEDHRECPage(ctx, reqURL, "top "+kind, &page); err != nil {
 		return nil, err
 	}
 
-	// Extract cards from all card lists
-	var allCards []EDHRECCardView
-	for _, cardList := range edhrecResp.Container.JSONDict.CardLists {
-		allCards = append(allCards, cardList.CardViews...)
+	return &page, nil
+}
+
+// FormatTopForDisplay formats an EDHREC ranking page. Card rankings carry potential_decks, so they
+// print an inclusion rate; commander rankings print the raw deck count. limit <= 0 shows everything.
+func FormatTopForDisplay(page *EDHRECResponse, kind, period string, limit int) string {
+	var output strings.Builder
+
+	title := page.Header
+	if title == "" {
+		title = fmt.Sprintf("Top %s", kind)
+	}
+	_, _ = fmt.Fprintf(&output, "# EDHREC %s\n\n", title)
+
+	shown := 0
+	for _, cardList := range page.Container.JSONDict.CardLists {
+		if len(cardList.CardViews) == 0 {
+			continue
+		}
+
+		_, _ = fmt.Fprintf(&output, "## %s\n\n", cardList.Header)
+
+		count := len(cardList.CardViews)
+		if limit > 0 && count > limit {
+			count = limit
+		}
+
+		for i := range count {
+			card := cardList.CardViews[i]
+			_, _ = fmt.Fprintf(&output, "%d. **%s**\n", i+1, card.Name)
+			writeCardDeckStats(&output, card.NumDecks, card.PotentialDecks)
+			output.WriteString("\n")
+		}
+		shown += count
 	}
 
-	return allCards, nil
+	if shown == 0 {
+		_, _ = fmt.Fprintf(&output, "No %s ranked for the past %s.\n", kind, period)
+	}
+
+	return output.String()
 }
