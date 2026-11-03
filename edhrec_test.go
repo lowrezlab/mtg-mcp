@@ -657,80 +657,125 @@ func TestFormatCombosForDisplay(t *testing.T) {
 	}
 }
 
-func TestGetTopCardsForCategory(t *testing.T) {
+func TestGetTopPage(t *testing.T) {
 	tests := []struct {
 		name       string
-		category   string
-		page       int
+		kind       string
+		period     string
 		mockStatus int
-		mockResp   EDHRECResponse
-		wantCards  int
+		wantPath   string
 		wantErr    bool
 	}{
 		{
-			name:       "successful request flattens card lists",
-			category:   "salt",
-			page:       0,
+			name:       "commanders week",
+			kind:       topKindCommanders,
+			period:     topPeriodWeek,
 			mockStatus: http.StatusOK,
-			mockResp: EDHRECResponse{
-				Container: EDHRECContainer{
-					JSONDict: EDHRECData{
-						CardLists: []EDHRECCardList{
-							{
-								Header: "Saltiest Cards",
-								CardViews: []EDHRECCardView{
-									{Name: "Armageddon"},
-									{Name: "Stasis"},
-								},
-							},
-							{
-								Header: "More Salt",
-								CardViews: []EDHRECCardView{
-									{Name: "Winter Orb"},
-								},
-							},
-						},
-					},
-				},
-			},
-			wantCards: 3,
-			wantErr:   false,
+			wantPath:   "/commanders/week.json",
 		},
 		{
-			name:       "404 not found",
-			category:   "missing",
-			page:       1,
-			mockStatus: http.StatusNotFound,
-			wantErr:    true,
+			name:       "cards month",
+			kind:       topKindCards,
+			period:     topPeriodMonth,
+			mockStatus: http.StatusOK,
+			wantPath:   "/top/month.json",
 		},
 		{
-			name:       "500 server error",
-			category:   "salt",
-			page:       0,
-			mockStatus: http.StatusInternalServerError,
+			name:    "unknown kind",
+			kind:    "lands",
+			period:  topPeriodWeek,
+			wantErr: true,
+		},
+		{
+			name:       "403 forbidden",
+			kind:       topKindCards,
+			period:     "decade",
+			mockStatus: http.StatusForbidden,
+			wantPath:   "/top/decade.json",
 			wantErr:    true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			var gotPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
 				w.WriteHeader(tt.mockStatus)
 				if tt.mockStatus == http.StatusOK {
-					_ = json.NewEncoder(w).Encode(tt.mockResp)
+					_ = json.NewEncoder(w).Encode(EDHRECResponse{Header: "Top Commanders"})
 				}
 			}))
 			defer server.Close()
 
-			got, err := getTopCardsForCategoryWithURL(context.Background(), tt.category, tt.page, server.URL)
+			page, err := getTopPageWithURL(context.Background(), tt.kind, tt.period, server.URL)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("getTopCardsForCategoryWithURL() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("getTopPageWithURL() error = %v, wantErr %v", err, tt.wantErr)
 			}
-			if !tt.wantErr && len(got) != tt.wantCards {
-				t.Errorf("got %d cards, want %d", len(got), tt.wantCards)
+			if gotPath != tt.wantPath {
+				t.Errorf("requested path %q, want %q", gotPath, tt.wantPath)
+			}
+			if !tt.wantErr && page.Header != "Top Commanders" {
+				t.Errorf("header = %q, want %q", page.Header, "Top Commanders")
 			}
 		})
 	}
+}
+
+func TestFormatTopForDisplay(t *testing.T) {
+	page := &EDHRECResponse{
+		Header: "Top Cards (Past Week)",
+		Container: EDHRECContainer{
+			JSONDict: EDHRECData{
+				CardLists: []EDHRECCardList{
+					{Header: "Empty", CardViews: []EDHRECCardView{}},
+					{
+						Header: "Past Week",
+						CardViews: []EDHRECCardView{
+							{Name: "Sol Ring", NumDecks: 230833, PotentialDecks: 275261},
+							{Name: "Jace, Multiverse Architect", NumDecks: 2986},
+							{Name: "Arcane Signet", NumDecks: 193741, PotentialDecks: 275261},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("limit, percentages and raw counts", func(t *testing.T) {
+		got := FormatTopForDisplay(page, topKindCards, topPeriodWeek, 2)
+		for _, want := range []string{
+			"# EDHREC Top Cards (Past Week)",
+			"## Past Week",
+			"1. **Sol Ring**",
+			"230833 of 275261 (83.9%)",
+			"2. **Jace, Multiverse Architect**",
+			"   - Decks: 2986\n",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("output missing %q:\n%s", want, got)
+			}
+		}
+		if strings.Contains(got, "Arcane Signet") {
+			t.Error("limit 2 should drop the third card")
+		}
+		if strings.Contains(got, "## Empty") {
+			t.Error("empty card lists should be skipped")
+		}
+	})
+
+	t.Run("zero limit shows everything", func(t *testing.T) {
+		if got := FormatTopForDisplay(page, topKindCards, topPeriodWeek, 0); !strings.Contains(got, "Arcane Signet") {
+			t.Errorf("limit 0 should show all cards:\n%s", got)
+		}
+	})
+
+	t.Run("empty page", func(t *testing.T) {
+		got := FormatTopForDisplay(&EDHRECResponse{}, topKindCommanders, topPeriodMonth, 10)
+		if !strings.Contains(got, "# EDHREC Top commanders") || !strings.Contains(got, "No commanders ranked") {
+			t.Errorf("unexpected empty-page output:\n%s", got)
+		}
+	})
 }
 
 func TestFormatCommanderRecsForDisplayEdgeCases(t *testing.T) {

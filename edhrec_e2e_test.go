@@ -278,6 +278,32 @@ func TestEDHRECSetCardsE2E(t *testing.T) {
 	}
 }
 
+// TestEDHRECTopE2E fetches each live ranking page the tool exposes.
+func TestEDHRECTopE2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping E2E test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for _, kind := range []string{topKindCommanders, topKindCards} {
+		for _, period := range []string{topPeriodWeek, topPeriodMonth, topPeriodYear} {
+			page, err := getTopPageWithURL(ctx, kind, period, defaultEDHRECBaseURL)
+			if err != nil {
+				t.Errorf("%s/%s: %v", kind, period, err)
+
+				continue
+			}
+
+			output := FormatTopForDisplay(page, kind, period, 5)
+			if !strings.Contains(output, "1. **") {
+				t.Errorf("%s/%s: expected ranked entries, got:\n%s", kind, period, output)
+			}
+		}
+	}
+}
+
 // contains checks if a string contains a substring.
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || indexOf(s, substr) >= 0)

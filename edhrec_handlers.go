@@ -172,3 +172,53 @@ func (s *MTGCommanderServer) handleGetEDHRECSetCards(
 
 	return mcp.NewToolResultText(FormatSetCardsForDisplay(page, code, limit)), nil
 }
+
+func (s *MTGCommanderServer) handleGetEDHRECTop(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	kind := strings.ToLower(strings.TrimSpace(request.GetString(paramKind, topKindCommanders)))
+	if _, ok := topPagePaths[kind]; !ok {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"argument %q must be %q or %q, got %q", paramKind, topKindCards, topKindCommanders, kind,
+		)), nil
+	}
+
+	period := strings.ToLower(strings.TrimSpace(request.GetString(paramPeriod, topPeriodWeek)))
+	switch period {
+	case topPeriodWeek, topPeriodMonth, topPeriodYear:
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"argument %q must be %q, %q or %q, got %q",
+			paramPeriod, topPeriodWeek, topPeriodMonth, topPeriodYear, period,
+		)), nil
+	}
+
+	limit := request.GetInt("limit", defaultTopLimit)
+	if limit < 0 {
+		return mcp.NewToolResultError("argument \"limit\" must be zero or greater"), nil
+	}
+
+	GetLogger().Info().
+		Str("tool", "get_edhrec_top").
+		Str(paramKind, kind).
+		Str(paramPeriod, period).
+		Int("limit", limit).
+		Msg("Fetching EDHREC top rankings")
+
+	page, err := getTopPageWithURL(ctx, kind, period, s.edhrecBaseURL)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"Failed to fetch EDHREC top %s for the past %s: %v", kind, period, err,
+		)), nil
+	}
+
+	GetLogger().Info().
+		Str("tool", "get_edhrec_top").
+		Str(paramKind, kind).
+		Str(paramPeriod, period).
+		Int("card_lists", len(page.Container.JSONDict.CardLists)).
+		Msg("Successfully fetched EDHREC top rankings")
+
+	return mcp.NewToolResultText(FormatTopForDisplay(page, kind, period, limit)), nil
+}

@@ -18,7 +18,7 @@ var (
 )
 
 const (
-	totalToolCount               = 20
+	totalToolCount               = 21
 	totalResourceCount           = 3
 	maxSearchLimit               = 50
 	defaultSplitLimit            = 2
@@ -36,6 +36,8 @@ const (
 	paramFace                    = "face"
 	paramTheme                   = "theme"
 	paramPriceTier               = "price_tier"
+	paramKind                    = "kind"
+	paramPeriod                  = "period"
 	faceFront                    = "front"
 	faceBack                     = "back"
 	defaultCardImageLanguage     = "en"
@@ -539,6 +541,28 @@ func (s *MTGCommanderServer) registerEDHRECTools(mcpServer *server.MCPServer) {
 		),
 	)
 	mcpServer.AddTool(edhrecSetCardsTool, s.handleGetEDHRECSetCards)
+
+	// Tool 21: Get EDHREC Top Rankings
+	edhrecTopTool := mcp.NewTool(
+		"get_edhrec_top",
+		mcp.WithDescription(
+			"Get EDHREC's most-played commanders or cards over the past week, month, or year. "+
+				"Commander rankings show how many decks were built with each commander; card "+
+				"rankings show each card's share of eligible decks and are dominated by staples",
+		),
+		mcp.WithString(paramKind,
+			mcp.Enum(topKindCommanders, topKindCards),
+			mcp.Description("What to rank: 'commanders' (default) or 'cards'"),
+		),
+		mcp.WithString(paramPeriod,
+			mcp.Enum(topPeriodWeek, topPeriodMonth, topPeriodYear),
+			mcp.Description("Time window: 'week' (default), 'month', or 'year'"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum entries to show (default: 25, 0 for no limit; EDHREC lists up to 100)"),
+		),
+	)
+	mcpServer.AddTool(edhrecTopTool, s.handleGetEDHRECTop)
 }
 
 // registerResources registers MCP resources.
