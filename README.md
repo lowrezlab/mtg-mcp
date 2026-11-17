@@ -1,13 +1,13 @@
 # MTG Commander MCP Server
 
 <!-- markdownlint-disable-next-line MD013 -->
-[![CI](https://github.com/nathanmartins/mtg-mcp/actions/workflows/ci.yaml/badge.svg)](https://github.com/nathanmartins/mtg-mcp/actions/workflows/ci.yaml) [![CD](https://github.com/nathanmartins/mtg-mcp/actions/workflows/cd.yaml/badge.svg)](https://github.com/nathanmartins/mtg-mcp/actions/workflows/cd.yaml) [![Lint](https://github.com/nathanmartins/mtg-mcp/actions/workflows/lint.yaml/badge.svg)](https://github.com/nathanmartins/mtg-mcp/actions/workflows/lint.yaml) ![Coverage](https://img.shields.io/badge/Coverage-93.2%25-green)
+[![CI](https://github.com/nathanmartins/mtg-mcp/actions/workflows/ci.yaml/badge.svg)](https://github.com/nathanmartins/mtg-mcp/actions/workflows/ci.yaml) [![CD](https://github.com/nathanmartins/mtg-mcp/actions/workflows/cd.yaml/badge.svg?event=push)](https://github.com/nathanmartins/mtg-mcp/actions/workflows/cd.yaml) [![Lint](https://github.com/nathanmartins/mtg-mcp/actions/workflows/lint.yaml/badge.svg)](https://github.com/nathanmartins/mtg-mcp/actions/workflows/lint.yaml) ![Coverage](https://img.shields.io/badge/Coverage-92.8%25-green)
 
 A Model Context Protocol (MCP) server for Magic: The Gathering Commander format, providing comprehensive card
 information, rulings, pricing, deck validation tools, and multi-platform deck importing.
 
 <!-- markdownlint-disable-next-line MD013 -->
-[![Go Report Card](https://goreportcard.com/badge/github.com/nathanmartins/mtg-mcp)](https://goreportcard.com/report/github.com/nathanmartins/mtg-mcp) [![License](https://img.shields.io/github/license/nathanmartins/mtg-mcp)](https://github.com/nathanmartins/mtg-mcp/blob/main/LICENSE) [![Release](https://img.shields.io/github/v/release/nathanmartins/mtg-mcp)](https://github.com/nathanmartins/mtg-mcp/releases/latest) [![Go Version](https://img.shields.io/github/go-mod/go-version/nathanmartins/mtg-mcp)](https://github.com/nathanmartins/mtg-mcp/blob/main/go.mod)
+[![Go Reference](https://pkg.go.dev/badge/github.com/nathanmartins/mtg-mcp.svg)](https://pkg.go.dev/github.com/nathanmartins/mtg-mcp) [![License](https://img.shields.io/github/license/nathanmartins/mtg-mcp)](https://github.com/nathanmartins/mtg-mcp/blob/main/LICENSE) [![Release](https://img.shields.io/github/v/release/nathanmartins/mtg-mcp)](https://github.com/nathanmartins/mtg-mcp/releases/latest) [![Go Version](https://img.shields.io/github/go-mod/go-version/nathanmartins/mtg-mcp)](https://github.com/nathanmartins/mtg-mcp/blob/main/go.mod)
 
 ## Features
 
@@ -50,9 +50,11 @@ information, rulings, pricing, deck validation tools, and multi-platform deck im
 
 7. **validate_deck** – Validate a Commander deck
     - 100-card deck size check
-    - Singleton rule verification (no duplicates except basics)
-    - Commander legality check
-    - Color identity validation
+    - Commander eligibility (rule 903.3) and ban check
+    - Singleton rule, exempting basic lands (including Snow-Covered) and cards like Relentless Rats
+    - Every card checked against the commander's color identity and the Commander banned list
+    - Flags names Scryfall does not recognize
+    - Looks cards up in batches of 75, so a full deck costs two Scryfall requests
     - Supports JSON array or text format decklists
 
 8. **get_card_image** – Get a card's image, localized by language
@@ -136,7 +138,7 @@ information, rulings, pricing, deck validation tools, and multi-platform deck im
 
 3. **get_glossary_term** - Get a Comprehensive Rules glossary definition by term.
 
-#### EDHREC Meta Data (2 tools)
+#### EDHREC Meta Data (3 tools)
 
 1. **get_edhrec_recommendations** – Get EDHREC recommendations for a commander
     - High-synergy cards with synergy scores
@@ -145,13 +147,20 @@ information, rulings, pricing, deck validation tools, and multi-platform deck im
     - Card categories (creatures, instants, artifacts, etc.)
     - Deck count and meta-statistics
     - Salt scores for controversial cards
+    - Optional `theme` (an EDHREC theme slug such as `infect`; the unfiltered response lists them)
+    - Optional `price_tier` (`budget` or `expensive`)
 
 2. **get_edhrec_combos** – Get popular combos for color combinations
     - Combo cards and prerequisites
     - Combo results (e.g., "Infinite mana", "Win the game")
     - Usage statistics and percentages
     - Ranked by popularity
-    - Color identity filtering (w/u/b/r/g)
+    - Colors as WUBRG letters in any order (`wu`, `UW`, `c` for colorless) or EDHREC names (`azorius`, `esper`)
+
+3. **get_edhrec_set_cards** – Get the Commander-relevant cards of a Magic set
+    - New commanders the set introduced, with their deck counts
+    - The set's cards with the share of eligible decks playing them
+    - Takes the short lowercase set code (`blb`, `c21`); full set names are not accepted
 
 ### Resources (Data Sources)
 
@@ -171,11 +180,15 @@ information, rulings, pricing, deck validation tools, and multi-platform deck im
    - Cached for repeated use
    - Includes all rules sections and glossary
 
+4. **ui://mtg-card** - Card image widget for MCP Apps hosts
+   - Linked from the `get_card_image` tool, so supporting hosts render the card inline
+   - The tool also returns the image itself and its URL for hosts without MCP Apps support
+
 ## Installation
 
 ### Prerequisites
 
-- Go 1.27 or later
+- Go 1.27.3 or later
 - Internet connection (for Scryfall API and currency conversion)
 
 ### Building from Source
@@ -188,7 +201,7 @@ cd mtg-mcp
 go mod tidy
 
 # Build the MCP server
-go build -o mtg-mcp
+go build -o mtg-mcp ./cmd/mtg-mcp
 ```
 
 The compiled binary `mtg-mcp` is an MCP server for use with Claude Desktop or other MCP clients.
@@ -202,6 +215,21 @@ The server uses stdio transport for communication with MCP clients like Claude D
 ```bash
 ./mtg-mcp
 ```
+
+Command-line flags:
+
+| Flag | Description |
+| ---- | ----------- |
+| `--version` | Print the version and exit |
+| `--debug` | Enable debug logging |
+| `--log-file PATH` | Write the log file to `PATH`; an empty value disables file logging |
+
+Logs go to stderr and to a log file; stdout is reserved for the MCP protocol.
+By default the log file is `mtg-mcp/mtg-commander-server.log` in the user cache directory.
+That is `~/Library/Caches` on macOS, `~/.cache` on Linux and `%LocalAppData%` on Windows.
+The flag takes precedence over `LOG_FILE`, then `MTG_MCP_LOG_FILE`, then the default.
+An explicitly empty environment value logs to stderr only. `NO_COLOR=1` disables console colors.
+If the file cannot be opened, the server logs to stderr only and keeps running.
 
 #### Connecting to Claude Desktop
 
@@ -328,10 +356,10 @@ configured entirely through environment variables:
 | `MCP_ALLOW_NO_SECRET` | —                          | `1` serves an open `/mcp` instead (local testing only)                  |
 | `MCP_RATE_LIMIT`      | `5`                        | Sustained requests per second across all clients (429 beyond it)        |
 | `MCP_RATE_BURST`      | `20`                       | Burst size for the rate limit                                           |
-| `LOG_FILE`            | `mtg-commander-server.log` | Log file path; empty logs to stderr only                                |
+| `LOG_FILE`            | User cache path          | Log file path; explicit empty logs to stderr only                                |
 
 ```bash
-MCP_TRANSPORT=http MCP_PATH_SECRET=$(openssl rand -hex 24) ./mtg-mcp
+LOG_FILE="" NO_COLOR=1 MCP_TRANSPORT=http MCP_PATH_SECRET=$(openssl rand -hex 24) ./mtg-mcp
 ```
 
 `GET /healthz` returns `ok`. Every other path returns 404, so the secret path
@@ -427,47 +455,37 @@ Once connected to Claude Desktop, you can ask questions like:
 
 ## Project Structure
 
+- `cmd/mtg-mcp` holds the binary's entrypoint.
+- `internal/` holds one package per upstream API, plus `mtgserver`, which exposes them as MCP tools and resources.
+- Each package keeps its tests next to the code: unit tests use `httptest` mocks.
+- E2E tests (`e2e_test.go`, `*_e2e_test.go`) call the real APIs and only build with the `e2e` tag.
+
 ```text
 mtg-mcp/
-├── main.go                  # Core MCP server, tool/resource registration
-├── logger.go                # Structured logging configuration (zerolog)
-├── http.go                  # HTTP utilities for API calls
-├── resources.go             # MCP resource handlers (rules, banned list)
-├── archidekt.go             # Archidekt API integration
-├── edhrec.go                # EDHREC API integration
-├── moxfield.go              # Moxfield API integration
-├── *_handlers.go            # MCP tool handlers per source
-│   ├── scryfall_handlers.go  # Scryfall tools (search, details, price, …)
-│   ├── archidekt_handlers.go # Archidekt tools
-│   ├── edhrec_handlers.go    # EDHREC tools
-│   └── moxfield_handlers.go  # Moxfield tools
-├── *_test.go                # Unit test files (with httptest mocks)
-│   ├── archidekt_test.go    # Tests for Archidekt functionality
-│   ├── edhrec_test.go       # Tests for EDHREC functionality
-│   ├── moxfield_test.go     # Tests for Moxfield functionality
-│   ├── http_test.go         # Tests for HTTP utilities
-│   ├── logger_test.go       # Tests for logger
-│   ├── server_test.go       # Tests for server construction & registration
-│   ├── resources_test.go    # Tests for MCP resource handlers
-│   ├── scryfall_handlers_test.go          # Tests for decklist parsing helpers
-│   ├── scryfall_handlers_internal_test.go # Tests for Scryfall tool handlers
-│   ├── handlers_success_test.go           # Deck-handler success-path tests
-│   └── handlers_error_test.go             # Handler request-validation tests
-├── *_e2e_test.go            # E2E test files (real API calls)
-│   ├── archidekt_e2e_test.go # E2E tests for Archidekt API
-│   ├── edhrec_e2e_test.go    # E2E tests for EDHREC API
-│   ├── moxfield_e2e_test.go  # E2E tests for Moxfield API
-│   └── scryfall_e2e_test.go  # E2E tests for Scryfall API
-├── .github/                 # GitHub Actions workflows
-│   └── workflows/
-│       ├── ci.yaml          # CI pipeline (unit tests + linting)
-│       ├── e2e.yaml         # Manual E2E tests + coverage workflow
-│       ├── cd.yaml          # Continuous deployment
-│       └── lint.yaml        # Code quality checks
-├── go.mod                   # Go module dependencies
-├── go.sum                   # Dependency checksums
-├── mtg-mcp                  # Compiled MCP server binary
-├── mtg-commander-server.log # Server log file (JSON)
+├── cmd/
+│   └── mtg-mcp/
+│       └── main.go          # Entrypoint: flags, logger, stdio transport
+├── internal/
+│   ├── mtgserver/           # MCP server: tool/resource registration and handlers
+│   │   ├── server.go        # Server type, tool and resource registration
+│   │   ├── toolargs.go      # Typed accessors for MCP tool arguments
+│   │   ├── resources.go     # Resource handlers (Commander rules, banned list)
+│   │   ├── scryfall_handlers.go  # Scryfall tools (search, details, price, image, …)
+│   │   ├── moxfield_handlers.go  # Moxfield tools
+│   │   ├── archidekt_handlers.go # Archidekt tools
+│   │   ├── edhrec_handlers.go    # EDHREC tools
+│   │   └── rules_handlers.go     # Comprehensive Rules tools
+│   ├── moxfield/            # Moxfield API client, commander verification, deck formatting
+│   ├── archidekt/           # Archidekt API client, deck search, deck formatting
+│   ├── edhrec/              # EDHREC JSON pages client and formatting
+│   ├── rules/               # Comprehensive Rules fetcher, parser and cache
+│   ├── deckfmt/             # Decklist grouping shared by the Moxfield and Archidekt formatters
+│   ├── httpx/               # Shared HTTP GET/JSON helpers with timeouts and status errors
+│   └── logging/             # zerolog setup (stderr + log file, never stdout)
+├── docker/Dockerfile        # stdio and mcp-proxy images
+├── .github/workflows/       # CI, E2E, CD and lint workflows
+├── Makefile                 # Build, test, lint and Docker targets
+├── go.mod / go.sum          # Go module dependencies
 └── README.md                # This file
 ```
 
@@ -515,7 +533,6 @@ make ci
 | `make test-coverage`         | Generate HTML coverage report                      |
 | `make test-coverage-cli`     | Show coverage in terminal                          |
 | `make update-coverage-badge` | Update coverage badge in README with proper colors |
-| `make test-race`             | Run tests with race detector                       |
 | `make bench`                 | Run benchmarks                                     |
 | `make fmt`                   | Format Go code                                     |
 | `make lint`                  | Run all linters                                    |
@@ -533,20 +550,24 @@ make ci
 The project includes comprehensive unit tests with good coverage:
 
 ```bash
-# Run all tests (unit tests only, skips E2E)
-go test -short -v ./...
+# Run unit tests (E2E tests are excluded unless the e2e build tag is set)
+go test -v ./...
 
 # Run tests with coverage
-go test -short -v -race -coverprofile=coverage.out -covermode=atomic ./...
+go test -v -coverprofile=coverage.out -covermode=atomic ./...
 
 # View coverage report
 go tool cover -html=coverage.out
+
+# Show the server's log output while debugging a test (silenced by default)
+MTG_MCP_TEST_LOGS=1 go test -v -run TestHandleValidateDeck ./internal/mtgserver/
 ```
 
 ### End-to-End (E2E) Tests
 
-E2E tests validate the integration with real external APIs (Scryfall, EDHREC, Moxfield) and are **not run
-automatically** in CI. They test:
+E2E tests validate the integration with real external APIs (Scryfall, EDHREC, Moxfield, Archidekt, WotC rules).
+They sit behind the `e2e` build tag, so `go test ./...` never calls the real APIs. Run them now and then, not on
+every change, to avoid hammering the upstream services. They test:
 
 - Real API connectivity and response formats
 - Data structure validation with actual API responses
@@ -557,14 +578,11 @@ automatically** in CI. They test:
 **Running E2E Tests Locally:**
 
 ```bash
-# Run all tests including E2E (no -short flag)
-go test -v ./...
+# Run all tests including E2E
+go test -tags e2e -v -timeout 5m ./...
 
-# Run only E2E tests
-go test -v -run E2E ./...
-
-# Run with timeout for slower APIs
-go test -v -timeout 5m ./...
+# Run only E2E tests (same as make test-e2e)
+go test -tags e2e -v -run E2E -timeout 5m ./...
 ```
 
 **Running E2E Tests via GitHub Actions:**
@@ -579,7 +597,7 @@ E2E tests can be triggered manually through the GitHub Actions workflow:
 The workflow:
 
 - Runs unit tests first for quick validation
-- Runs all tests including E2E (without `-short` flag)
+- Runs all tests including E2E (with `-tags e2e`)
 - Generates coverage badge and auto-commits to README
 - Has a 15-minute timeout to accommodate API calls
 - Uploads test logs as artifacts for debugging
@@ -587,9 +605,14 @@ The workflow:
 
 **E2E Test Files:**
 
-- `edhrec_e2e_test.go` - EDHREC API integration tests
-- `moxfield_e2e_test.go` - Moxfield API integration tests
-- `scryfall_e2e_test.go` - Scryfall API integration tests
+- `internal/archidekt/e2e_test.go` - Archidekt API integration tests
+- `internal/edhrec/e2e_test.go` - EDHREC API integration tests
+- `internal/moxfield/e2e_test.go` - Moxfield API integration tests
+- `internal/rules/e2e_test.go` - Comprehensive Rules fetch integration tests
+- `internal/httpx/json_v2_e2e_test.go` - checks `encoding/json/v2` decodes real responses like v1
+- `internal/mtgserver/scryfall_e2e_test.go` and `scryfall_image_e2e_test.go` - Scryfall API integration tests
+- `internal/mtgserver/tools_e2e_test.go` - calls every MCP tool and reads every resource against the live APIs
+  (a test fails when a registered tool has no e2e case)
 
 **Note:** E2E tests make real API calls and are subject to:
 
@@ -612,23 +635,28 @@ golangci-lint run --fix
 
 ### Adding New Tools
 
-1. Define the tool in `registerTools()` using `mcp.NewTool()`
-2. Create a handler function with a signature:
+1. For a new upstream API, add a client package under `internal/` (`internal/edhrec` is a small example).
+   Give it a `Client` with a `BaseURL` field and a `NewClient()` for production, and hold it on `Server`.
+   Fetch through `httpx.GetJSON`, which adds a request timeout, typed status errors and `encoding/json/v2` decoding.
+   Unit tests point a `&Client{BaseURL: server.URL}` at an `httptest` server, so they never call the real API.
+2. Define the tool with `mcp.NewTool()` in `internal/mtgserver/server.go`.
+   Use `registerTools()` or the matching per-source `register*Tools()` helper.
+3. Create a handler in the matching `internal/mtgserver/*_handlers.go` file, reading arguments with the helpers in `toolargs.go`:
 
    ```go
-   func (s *MTGCommanderServer) handleToolName(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error)
+   func (s *Server) handleToolName(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error)
    ```
 
-3. Register with `mcpServer.AddTool()`
-4. Write unit tests in a corresponding `*_test.go` file
+4. Register it with `mcpServer.AddTool()` and add its name to the expected list in `server_test.go`.
+5. Write unit tests next to the code: client tests in the client package, handler tests in `internal/mtgserver`.
 
 ### Adding New Resources
 
-1. Define the resource in `registerResources()` using `mcp.NewResource()`
+1. Define the resource in `registerResources()` in `internal/mtgserver/server.go` using `mcp.NewResource()`
 2. Create a handler function with a signature:
 
    ```go
-   func (s *MTGCommanderServer) handleResourceName(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error)
+   func (s *Server) handleResourceName(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error)
    ```
 
 3. Register with `mcpServer.AddResource()`
@@ -641,7 +669,7 @@ The project uses GitHub Actions with two main workflows:
 **CI Workflow** (runs on push/PR):
 
 - **Build**: Compiles the project for Linux/amd64
-- **Test**: Runs unit tests (with `-short` flag) with race detection
+- **Test**: Runs unit tests (E2E tests are excluded by the `e2e` build tag)
 - **Lint**: Runs golangci-lint for code quality checks
 - Fast feedback loop for development (skips E2E tests)
 

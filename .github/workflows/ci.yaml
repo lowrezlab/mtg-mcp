@@ -7,10 +7,18 @@ on: # yamllint disable-line rule:truthy
     branches: [master, main]
     paths:
       - "**.go"
+      - go.mod
+      - go.sum
+      - .golangci.yml
+      - .github/workflows/ci.yaml
   pull_request:
     branches: [master, main]
     paths:
       - "**.go"
+      - go.mod
+      - go.sum
+      - .golangci.yml
+      - .github/workflows/ci.yaml
 
 permissions:
   contents: read
@@ -70,16 +78,16 @@ jobs:
         run: go mod download -x
 
       - name: Go Build
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /dev/null
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /dev/null ./cmd/mtg-mcp
 
       - name: Run tests
         run: |
-          go test -short -json -v ./... 2>&1 | tee /tmp/gotest.log | gotestfmt
+          go test -json -v ./... 2>&1 | tee /tmp/gotest.log | gotestfmt
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          # Pinned: an unpinned "latest" broke CI when v2.15.0 renamed a config option.
+          # Pinned to match the reviewed lint configuration.
           version: v2.15.0
           args: "--timeout=2m --config=.golangci.yml"
           skip-save-cache: true

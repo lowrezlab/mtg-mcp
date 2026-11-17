@@ -1,0 +1,1091 @@
+package mtgserver
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json/v2"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/BlueMonday/go-scryfall"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/nathanmartins/mtg-mcp/internal/httpx"
+	"github.com/nathanmartins/mtg-mcp/internal/logging"
+)
+
+var (
+	errCollectorNeedsSet = errors.New("collector_number requires set")
+	errNoBackFace        = errors.New("no back face image available for this card")
+)
+
+func (s *Server) handleSearchCards(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	query, err := request.RequireString("query")
+	if err != nil {
+		logging.Get().Error().Err(err).Str("tool", "search_cards").Msg("Missing required query parameter")
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	const defaultLimit = 10
+	limit, err := cappedIntArg(request.GetArguments(), "limit", defaultLimit, 1, maxSearchLimit)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	logging.Get().Info().
+		Str("tool", "search_cards").
+		Str("query", query).
+		Int("limit", limit).
+		Msg("Searching for cards")
+
+	searchOpts := scryfall.SearchCardsOptions{
+		Unique: "cards",
+		Order:  cardSortOrderName,
+	}
+
+	result, err := s.scryfallClient.SearchCards(ctx, query, searchOpts)
+	if err != nil {
+		logging.Get().Error().
+			Err(err).
+			Str("tool", "search_cards").
+			Str("query", query).
+			Msg("Scryfall search failed")
+		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
+	}
+
+	if len(result.Cards) == 0 {
+		logging.Get().Info().
+			Str("tool", "search_cards").
+			Str("query", query).
+			Msg("No cards found")
+		return mcp.NewToolResultText("No cards found matching your query."), nil
+	}
+
+	logging.Get().Info().
+		Str("tool", "search_cards").
+		Str("query", query).
+		Int("results_found", result.TotalCards).
+		Int("results_returned", len(result.Cards)).
+		Msg("Search completed successfully")
+
+	if len(result.Cards) > limit {
+		result.Cards = result.Cards[:limit]
+	}
+
+	var output strings.Builder
+	_, _ = fmt.Fprintf(&output, "Found %d cards (showing first %d):\n\n", result.TotalCards, len(result.Cards))
+
+	for i, card := range result.Cards {
+		_, _ = fmt.Fprintf(&output, "%d. **%s** %s\n", i+1, card.Name, card.ManaCost)
+		_, _ = fmt.Fprintf(&output, "   Type: %s\n", card.TypeLine)
+		if card.OracleText != "" {
+			_, _ = fmt.Fprintf(&output, "   Text: %s\n", card.OracleText)
+		}
+		_, _ = fmt.Fprintf(&output, "   Set: %s (%s)\n", card.SetName, strings.ToUpper(card.Set))
+		_, _ = fmt.Fprintf(&output, "   Commander Legal: %s\n\n", card.Legalities.Commander)
+	}
+
+	return mcp.NewToolResultText(output.String()), nil
+}
+
+func (s *Server) handleGetCardDetails(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	name, err := request.RequireString(paramName)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	card, err := s.scryfallClient.GetCardByName(ctx, name, false, scryfall.GetCardByNameOptions{})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Card not found: %v", err)), nil
+	}
+
+	var output strings.Builder
+	_, _ = fmt.Fprintf(&output, "# %s %s\n\n", card.Name, card.ManaCost)
+	_, _ = fmt.Fprintf(&output, "**Type:** %s\n", card.TypeLine)
+	_, _ = fmt.Fprintf(&output, "**Set:** %s (%s) #%s\n", card.SetName, strings.ToUpper(card.Set), card.CollectorNumber)
+	_, _ = fmt.Fprintf(&output, "**Rarity:** %s\n\n", card.Rarity)
+
+	if card.OracleText != "" {
+		_, _ = fmt.Fprintf(&output, "**Oracle Text:**\n%s\n\n", card.OracleText)
+	}
+
+	if card.Power != nil && card.Toughness != nil {
+		_, _ = fmt.Fprintf(&output, "**Power/Toughness:** %s/%s\n", *card.Power, *card.Toughness)
+	}
+
+	if card.Loyalty != nil {
+		_, _ = fmt.Fprintf(&output, "**Loyalty:** %s\n", *card.Loyalty)
+	}
+
+	if len(card.ColorIdentity) > 0 {
+		colors := make([]string, len(card.ColorIdentity))
+		for i, c := range card.ColorIdentity {
+			colors[i] = string(c)
+		}
+		_, _ = fmt.Fprintf(&output, "**Color Identity:** %s\n", strings.Join(colors, ", "))
+	}
+
+	output.WriteString("\n**Format Legalities:**\n")
+	_, _ = fmt.Fprintf(&output, "- Commander: %s\n", card.Legalities.Commander)
+	_, _ = fmt.Fprintf(&output, "- Legacy: %s\n", card.Legalities.Legacy)
+	_, _ = fmt.Fprintf(&output, "- Vintage: %s\n", card.Legalities.Vintage)
+	_, _ = fmt.Fprintf(&output, "- Modern: %s\n", card.Legalities.Modern)
+	_, _ = fmt.Fprintf(&output, "- Standard: %s\n", card.Legalities.Standard)
+
+	if card.Artist != nil {
+		_, _ = fmt.Fprintf(&output, "\n**Artist:** %s\n", *card.Artist)
+	}
+
+	_, _ = fmt.Fprintf(&output, "\n**Scryfall Link:** %s\n", card.ScryfallURI)
+
+	return mcp.NewToolResultText(output.String()), nil
+}
+
+// imageQuery holds the resolved get_card_image arguments.
+type imageQuery struct {
+	name            string
+	language        string
+	size            string
+	set             string
+	collectorNumber string
+	face            string
+}
+
+// validate reports the first invalid-argument error, or nil when the query is valid.
+func (q imageQuery) validate() error {
+	if !isValidImageSize(q.size) {
+		return fmt.Errorf(
+			"%w size %q; valid sizes: small, normal, large, png, art_crop, border_crop", errInvalid, q.size)
+	}
+	if q.face != "" && q.face != faceFront && q.face != faceBack {
+		return fmt.Errorf("%w face %q; valid faces: front, back", errInvalid, q.face)
+	}
+	if q.collectorNumber != "" && q.set == "" {
+		return errCollectorNeedsSet
+	}
+
+	return nil
+}
+
+func (s *Server) handleGetCardImage(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	name, err := request.RequireString(paramName)
+	if err != nil {
+		logging.Get().Error().Err(err).Str("tool", "get_card_image").Msg("Missing required name parameter")
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	q := imageQuery{name: name, language: defaultCardImageLanguage, size: defaultCardImageSize}
+	args := request.GetArguments()
+	if v, ok := args[paramLanguage].(string); ok && strings.TrimSpace(v) != "" {
+		q.language = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v, ok := args[paramSize].(string); ok && strings.TrimSpace(v) != "" {
+		q.size = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v, ok := args[paramSet].(string); ok {
+		q.set = strings.ToLower(strings.TrimSpace(v))
+	}
+	if v, ok := args[paramCollectorNumber].(string); ok {
+		q.collectorNumber = strings.TrimSpace(v)
+	}
+	if v, ok := args[paramFace].(string); ok && strings.TrimSpace(v) != "" {
+		q.face = strings.ToLower(strings.TrimSpace(v))
+	}
+
+	if validateErr := q.validate(); validateErr != nil {
+		return mcp.NewToolResultError(validateErr.Error()), nil
+	}
+
+	logging.Get().Info().
+		Str("tool", "get_card_image").
+		Str(paramName, q.name).Str(paramLanguage, q.language).Str(paramSize, q.size).
+		Str(paramSet, q.set).Str(paramCollectorNumber, q.collectorNumber).Str(paramFace, q.face).
+		Msg("Fetching card image")
+
+	card, usedLang, err := s.resolveCardForImage(ctx, q)
+	if err != nil {
+		logging.Get().Error().Err(err).Str("tool", "get_card_image").Str(paramName, q.name).Msg("Card not found")
+		return mcp.NewToolResultError(fmt.Sprintf("Card not found: %v", err)), nil
+	}
+
+	images, err := cardImagesForFace(card, q.size, q.face)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if len(images) == 0 {
+		return mcp.NewToolResultError(fmt.Sprintf("No %s image available for %s", q.size, card.Name)), nil
+	}
+
+	return s.buildCardImageResult(ctx, card, usedLang, q.language, q.size, images)
+}
+
+const (
+	// mimeMCPAppHTML is the MIME type required by the MCP Apps (io.modelcontextprotocol/ui)
+	// spec for a ui:// HTML resource; plain text/html is rejected as an unsupported format.
+	mimeMCPAppHTML = "text/html;profile=mcp-app"
+
+	// MCP Apps UI extension _meta keys: _meta.ui.resourceUri.
+	metaKeyUI          = "ui"
+	metaKeyResourceURI = "resourceUri"
+
+	// cardImageWidgetURI is the fixed, statically-registered ui:// resource for the
+	// card image widget. get_card_image points _meta.ui.resourceUri here (on the tool
+	// AND the result); per-card images are delivered to the widget as structuredContent
+	// via the host's ui/notifications/tool-result — MCP Apps does not support resource
+	// templates, so the referenced URI must be a concrete, readable resource.
+	cardImageWidgetURI = "ui://mtg-card"
+
+	// cardImageAppScript runs the MCP Apps handshake (defensively) AND renders
+	// the card image(s) the host delivers via ui/notifications/tool-result: it reads
+	// result.structuredContent.images[].src (base64 data: URIs) and injects <img>. The
+	// widget resource is fixed, so the per-card data must arrive over this channel.
+	cardImageAppScript = `<script>(function(){var n=1,done=false;` +
+		`function note(m,p){parent.postMessage({jsonrpc:"2.0",method:m,params:p||{}},"*");}` +
+		`function req(m,p){parent.postMessage({jsonrpc:"2.0",id:n++,method:m,params:p||{}},"*");}` +
+		`function size(){note("ui/notifications/size-changed",` +
+		`{width:document.body.scrollWidth,height:document.body.scrollHeight});}` +
+		`function ready(){if(done)return;done=true;note("ui/notifications/initialized",{});size();}` +
+		`function render(res){var sc=res&&res.structuredContent;if(!sc||!sc.images)return;` +
+		`var root=document.getElementById("cards"),st=document.getElementById("status");if(!root)return;` +
+		`root.innerHTML="";for(var i=0;i<sc.images.length;i++){var im=document.createElement("img");` +
+		`im.src=sc.images[i].src;im.alt=sc.images[i].face||"";root.appendChild(im);}` +
+		`if(st)st.style.display=sc.images.length?"none":"block";size();}` +
+		`addEventListener("message",function(e){var d=e.data||{};` +
+		`if(d.method==="ui/notifications/tool-result"){render(d.params||{});}` +
+		`if((d.id===1&&d.result)||(typeof d.method==="string"&&d.method.lastIndexOf("ui/",0)===0))ready();});` +
+		`req("ui/initialize",{appCapabilities:{},clientInfo:{name:"mtg-mcp",version:"1.0.0"},` +
+		`protocolVersion:"2026-01-26"});` +
+		`setTimeout(ready,400);setTimeout(size,900);addEventListener("load",size);` +
+		`if(window.ResizeObserver){new ResizeObserver(size).observe(document.body);}` +
+		`})();</script>`
+
+	// cardImageWidgetHTML is the fixed MCP Apps document served for cardImageWidgetURI.
+	// It renders no card by itself; cardImageAppScript fills #cards from tool-result data.
+	cardImageWidgetHTML = `<!doctype html><html><head><meta charset="utf-8"><style>` +
+		`body{margin:0;background:#0d0d0d;color:#e6e6e6;font-family:system-ui,sans-serif}` +
+		`#cards{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;padding:12px}` +
+		`#cards img{max-width:100%;height:auto;border-radius:14px}` +
+		`#status{padding:16px;text-align:center;opacity:.7;font-size:14px}` +
+		`</style></head><body><div id="cards"></div>` +
+		`<div id="status">Loading card image…</div>` +
+		cardImageAppScript + `</body></html>`
+)
+
+// cardImageData is the structuredContent payload for get_card_image. The host
+// forwards it to the ui://mtg-card widget via ui/notifications/tool-result; the
+// widget renders images[].src (base64 data: URIs). It is not added to model context.
+type cardImageData struct {
+	Name     string           `json:"name"`
+	Language string           `json:"language"`
+	Size     string           `json:"size"`
+	Fallback bool             `json:"fallback"`
+	Images   []cardImageDatum `json:"images"`
+}
+
+// cardImageDatum is one rendered face: an alt label and a base64 data: image URI.
+type cardImageDatum struct {
+	Face string `json:"face"`
+	Src  string `json:"src"`
+}
+
+// buildCardImageResult downloads each face, inlines it as a base64 data: URI, and
+// returns an MCP Apps result: a text summary with a per-face Scryfall link (the
+// fallback for non-UI clients), the images in structuredContent (rendered by the
+// ui://mtg-card widget), and _meta.ui.resourceUri pointing at that fixed widget.
+func (s *Server) buildCardImageResult(
+	ctx context.Context,
+	card scryfall.Card,
+	usedLang scryfall.Lang,
+	requestedLang, size string,
+	images []cardImage,
+) (*mcp.CallToolResult, error) {
+	mimeType := imageMIMEType(size)
+	fallback := usedLang == scryfall.LangEnglish && requestedLang != string(scryfall.LangEnglish)
+
+	var text strings.Builder
+	_, _ = fmt.Fprintf(&text, "# %s\n", card.Name)
+	if fallback {
+		_, _ = fmt.Fprintf(&text, "*No '%s' printing found; showing English.*\n", requestedLang)
+	}
+	_, _ = fmt.Fprintf(&text, "**Language:** %s\n**Size:** %s\n", usedLang, size)
+	if card.Set != "" {
+		_, _ = fmt.Fprintf(
+			&text,
+			"**Set:** %s (%s) #%s\n",
+			card.SetName,
+			strings.ToUpper(card.Set),
+			card.CollectorNumber,
+		)
+	}
+	text.WriteString("\n")
+
+	data := cardImageData{Name: card.Name, Language: string(usedLang), Size: size, Fallback: fallback}
+	for _, img := range images {
+		raw, dlErr := s.fetchImage(ctx, img.url)
+		if dlErr != nil {
+			logging.Get().Error().Err(dlErr).Str("tool", "get_card_image").
+				Str("url", img.url).Msg("Failed to download card image")
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to download image: %v", dlErr)), nil
+		}
+
+		src := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(raw))
+		data.Images = append(data.Images, cardImageDatum{Face: img.faceName, Src: src})
+		_, _ = fmt.Fprintf(&text, "[%s — view on Scryfall](%s)\n\n", img.faceName, img.url)
+	}
+
+	result := mcp.NewToolResultText(text.String())
+	result.StructuredContent = data
+	result.Meta = mcp.NewMetaFromMap(map[string]any{
+		metaKeyUI: map[string]any{metaKeyResourceURI: cardImageWidgetURI},
+	})
+
+	return result, nil
+}
+
+// handleCardImageUIResource serves the fixed MCP Apps widget for cardImageWidgetURI.
+// The document renders no card by itself; the host delivers the per-card images to it
+// as structuredContent via ui/notifications/tool-result (see cardImageAppScript).
+func (s *Server) handleCardImageUIResource(
+	_ context.Context,
+	request mcp.ReadResourceRequest,
+) ([]mcp.ResourceContents, error) {
+	return []mcp.ResourceContents{
+		&mcp.TextResourceContents{
+			URI:      request.Params.URI,
+			MIMEType: mimeMCPAppHTML,
+			Text:     cardImageWidgetHTML,
+		},
+	}, nil
+}
+
+func (s *Server) handleCheckLegality(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	name, err := request.RequireString(paramName)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	card, err := s.scryfallClient.GetCardByName(ctx, name, false, scryfall.GetCardByNameOptions{})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Card not found: %v", err)), nil
+	}
+
+	var output strings.Builder
+	_, _ = fmt.Fprintf(&output, "# Legality Check: %s\n\n", card.Name)
+
+	legality := string(card.Legalities.Commander)
+	status := strings.ToUpper(legality[:1]) + legality[1:]
+	_, _ = fmt.Fprintf(&output, "**Commander Format:** %s\n\n", status)
+
+	switch card.Legalities.Commander {
+	case scryfall.LegalityBanned:
+		output.WriteString("⚠️ This card is **BANNED** in Commander format.\n\n")
+	case scryfall.LegalityLegal:
+		output.WriteString("✅ This card is **LEGAL** in Commander format.\n\n")
+	case scryfall.LegalityNotLegal, scryfall.LegalityRestricted:
+		output.WriteString("❌ This card is **NOT LEGAL** in Commander format.\n\n")
+	}
+
+	output.WriteString("**All Format Legalities:**\n")
+	_, _ = fmt.Fprintf(&output, "- Standard: %s\n", card.Legalities.Standard)
+	_, _ = fmt.Fprintf(&output, "- Pioneer: %s\n", card.Legalities.Pioneer)
+	_, _ = fmt.Fprintf(&output, "- Modern: %s\n", card.Legalities.Modern)
+	_, _ = fmt.Fprintf(&output, "- Legacy: %s\n", card.Legalities.Legacy)
+	_, _ = fmt.Fprintf(&output, "- Vintage: %s\n", card.Legalities.Vintage)
+	_, _ = fmt.Fprintf(&output, "- Pauper: %s\n", card.Legalities.Pauper)
+	_, _ = fmt.Fprintf(&output, "- Commander: %s\n", card.Legalities.Commander)
+
+	return mcp.NewToolResultText(output.String()), nil
+}
+
+func (s *Server) handleGetRulings(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	name, err := request.RequireString(paramName)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	card, err := s.scryfallClient.GetCardByName(ctx, name, false, scryfall.GetCardByNameOptions{})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Card not found: %v", err)), nil
+	}
+
+	rulings, err := s.scryfallClient.GetRulings(ctx, card.ID)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to get rulings: %v", err)), nil
+	}
+
+	var output strings.Builder
+	_, _ = fmt.Fprintf(&output, "# Rulings for %s\n\n", card.Name)
+
+	if len(rulings) == 0 {
+		output.WriteString("No official rulings found for this card.\n")
+	} else {
+		_, _ = fmt.Fprintf(&output, "Found %d ruling(s):\n\n", len(rulings))
+		for i, ruling := range rulings {
+			_, _ = fmt.Fprintf(&output, "%d. **%s** (%s)\n", i+1, ruling.PublishedAt, ruling.Source)
+			_, _ = fmt.Fprintf(&output, "   %s\n\n", ruling.Comment)
+		}
+	}
+
+	return mcp.NewToolResultText(output.String()), nil
+}
+
+func (s *Server) handleGetPrice(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	name, err := request.RequireString(paramName)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	setCode := ""
+	args := request.GetArguments()
+	if setVal, hasSet := args[paramSet]; hasSet {
+		if set, ok := setVal.(string); ok {
+			setCode = set
+		}
+	}
+
+	var card scryfall.Card
+	if setCode != "" {
+		searchQuery := fmt.Sprintf(`!"%s" set:%s`, name, setCode)
+		result, searchErr := s.scryfallClient.SearchCards(ctx, searchQuery, scryfall.SearchCardsOptions{})
+		if searchErr != nil {
+			return nil, fmt.Errorf("failed to search for card: %w", searchErr)
+		}
+		if len(result.Cards) == 0 {
+			return mcp.NewToolResultError(fmt.Sprintf("Card not found in set %s", setCode)), nil
+		}
+		card = result.Cards[0]
+	} else {
+		c, getErr := s.scryfallClient.GetCardByName(ctx, name, false, scryfall.GetCardByNameOptions{})
+		if getErr != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Card not found: %v", getErr)), nil
+		}
+		card = c
+	}
+
+	var output strings.Builder
+	_, _ = fmt.Fprintf(&output, "# Pricing for %s\n", card.Name)
+	_, _ = fmt.Fprintf(&output, "Set: %s (%s) #%s\n\n", card.SetName, strings.ToUpper(card.Set), card.CollectorNumber)
+
+	usdToBRL, err := s.fetchExchangeRate(ctx)
+	conversionNote := "converted"
+	if err != nil {
+		logging.Get().Warn().Err(err).Msg("Failed to get exchange rate, using fallback")
+		usdToBRL = fallbackUSDToBRL
+		conversionNote = fmt.Sprintf(
+			"converted at a fallback rate of %.2f; the live rate was unavailable",
+			fallbackUSDToBRL,
+		)
+	}
+
+	hasPricing := false
+
+	if card.Prices.USD != "" {
+		_, _ = fmt.Fprintf(&output, "**USD:** $%s\n", card.Prices.USD)
+		if brl, ok := convertToBRL(card.Prices.USD, usdToBRL); ok {
+			_, _ = fmt.Fprintf(&output, "**BRL:** R$ %.2f (%s)\n", brl, conversionNote)
+		}
+		hasPricing = true
+	}
+
+	if card.Prices.USDFoil != "" {
+		_, _ = fmt.Fprintf(&output, "**USD (Foil):** $%s\n", card.Prices.USDFoil)
+		if brl, ok := convertToBRL(card.Prices.USDFoil, usdToBRL); ok {
+			_, _ = fmt.Fprintf(&output, "**BRL (Foil):** R$ %.2f (%s)\n", brl, conversionNote)
+		}
+		hasPricing = true
+	}
+
+	if card.Prices.EUR != "" {
+		_, _ = fmt.Fprintf(&output, "**EUR:** €%s\n", card.Prices.EUR)
+		hasPricing = true
+	}
+
+	if card.Prices.EURFoil != "" {
+		_, _ = fmt.Fprintf(&output, "**EUR (Foil):** €%s\n", card.Prices.EURFoil)
+		hasPricing = true
+	}
+
+	if card.Prices.Tix != "" {
+		_, _ = fmt.Fprintf(&output, "**MTGO Tix:** %s\n", card.Prices.Tix)
+		hasPricing = true
+	}
+
+	if !hasPricing {
+		output.WriteString("No pricing data available for this card.\n")
+	} else {
+		_, _ = fmt.Fprintf(&output, "\n*Exchange rate: 1 USD = %.4f BRL*\n", usdToBRL)
+		output.WriteString(
+			"*Note: BRL prices are converted from USD and may not reflect Brazilian market conditions*\n",
+		)
+	}
+
+	return mcp.NewToolResultText(output.String()), nil
+}
+
+func (s *Server) handleGetBannedList(
+	ctx context.Context,
+	_ mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	searchQuery := "banned:commander"
+	result, err := s.scryfallClient.SearchCards(ctx, searchQuery, scryfall.SearchCardsOptions{
+		Order: cardSortOrderName,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to fetch banned list: %v", err)), nil
+	}
+
+	var output strings.Builder
+	output.WriteString("# Commander Format Banned List\n\n")
+	_, _ = fmt.Fprintf(&output, "Total banned cards: %d\n\n", result.TotalCards)
+
+	for i, card := range result.Cards {
+		_, _ = fmt.Fprintf(&output, "%d. %s\n", i+1, card.Name)
+	}
+
+	output.WriteString("\n*Source: Scryfall (powered by Wizards of the Coast official data)*\n")
+	output.WriteString("*Last updated: This query fetches real-time data*\n")
+
+	return mcp.NewToolResultText(output.String()), nil
+}
+
+func (s *Server) handleValidateDeck(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	commanderName, err := request.RequireString(paramCommander)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	decklistStr, err := request.RequireString("decklist")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	cardNames := parseDecklistString(decklistStr)
+
+	commander, err := s.scryfallClient.GetCardByName(ctx, commanderName, false, scryfall.GetCardByNameOptions{})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Commander card not found: %v", err)), nil
+	}
+
+	report := &deckReport{}
+	report.printf("# Commander Deck Validation\n\n")
+	report.printf("**Commander:** %s\n", commander.Name)
+	report.printf("**Color Identity:** %s\n\n", formatColorIdentity(commander.ColorIdentity))
+
+	if commander.Legalities.Commander == scryfall.LegalityBanned {
+		report.problem("❌ **ERROR:** Your commander is banned in Commander format!\n\n")
+	}
+	if !commanderEligible(commander) {
+		report.problem("❌ **ERROR:** This card cannot be a commander: it must be a legendary creature, Vehicle, " +
+			"or Spacecraft with power/toughness, or say it can be your commander (rule 903.3).\n\n")
+	}
+
+	report.deckSize(len(cardNames))
+
+	cards, unknown, lookupErr := s.lookupCards(ctx, cardNames)
+	report.singleton(cardNames, cards)
+	if lookupErr != nil {
+		logging.Get().Warn().Err(lookupErr).Str("tool", "validate_deck").Msg("Card lookup failed")
+		report.problem(fmt.Sprintf("\n⚠️ **Could not check color identity or card legality:** %v\n", lookupErr))
+	} else {
+		report.cardChecks(cardNames, cards, unknown, commander.ColorIdentity)
+	}
+
+	report.verdict()
+	return mcp.NewToolResultText(report.String()), nil
+}
+
+// deckReport accumulates validate_deck output and counts the problems it reports.
+type deckReport struct {
+	out      strings.Builder
+	problems int
+}
+
+func (r *deckReport) String() string {
+	return r.out.String()
+}
+
+func (r *deckReport) printf(format string, args ...any) {
+	_, _ = fmt.Fprintf(&r.out, format, args...)
+}
+
+// problem writes text that describes a rule violation (or an unverifiable check).
+func (r *deckReport) problem(text string) {
+	r.problems++
+	r.out.WriteString(text)
+}
+
+// list writes a heading and its sorted entries, counting a problem when there are entries.
+func (r *deckReport) list(heading, okText string, entries []string) {
+	if len(entries) == 0 {
+		r.printf("\n**%s:** ✅ %s\n", heading, okText)
+		return
+	}
+	slices.Sort(entries)
+	r.problems++
+	r.printf("\n**%s:** ❌\n", heading)
+	for _, entry := range entries {
+		r.printf("  - %s\n", entry)
+	}
+}
+
+func (r *deckReport) deckSize(total int) {
+	r.printf("**Deck Size:** %d cards ", total)
+	switch total {
+	case deckValidationBasicCardCount:
+		r.out.WriteString("✅\n")
+	case deckValidationCommanderCount:
+		r.out.WriteString("(Note: 100 cards including commander, should be 99 in decklist)\n")
+	default:
+		r.problem("❌ (should be 99 cards plus commander)\n")
+	}
+}
+
+// singleton flags cards present more often than allowed. With card data it honours the Basic
+// supertype and cards whose text permits more copies; otherwise it falls back to basic names.
+func (r *deckReport) singleton(names []string, cards map[string]scryfall.Card) {
+	counts := make(map[string]int)
+	display := make(map[string]string)
+	limits := make(map[string]int)
+	for _, name := range names {
+		key := cardKey(name)
+		limit := 1
+		if card, ok := cards[key]; ok {
+			key, limit = cardKey(card.Name), allowedCopies(card)
+			display[key] = card.Name
+		} else if slices.Contains(basicLandNames(), key) {
+			limit = unlimitedCopies
+		}
+		if _, ok := display[key]; !ok {
+			display[key] = strings.TrimSpace(name)
+		}
+		counts[key]++
+		limits[key] = limit
+	}
+
+	var duplicates []string
+	for key, count := range counts {
+		if limit := limits[key]; limit != unlimitedCopies && count > limit {
+			duplicates = append(duplicates, fmt.Sprintf("%s (x%d)", display[key], count))
+		}
+	}
+	r.list("Singleton Rule", "No duplicates", duplicates)
+}
+
+// cardChecks reports unknown names, cards outside the commander's color identity, and cards
+// that are banned or not legal in Commander.
+func (r *deckReport) cardChecks(
+	names []string,
+	cards map[string]scryfall.Card,
+	unknown []string,
+	identity []scryfall.Color,
+) {
+	var offColor, banned []string
+	checked := make(map[string]bool)
+	for _, name := range names {
+		card, ok := cards[cardKey(name)]
+		if !ok || checked[card.Name] {
+			continue
+		}
+		checked[card.Name] = true
+		if !colorIdentityWithin(card, identity) {
+			offColor = append(offColor, fmt.Sprintf("%s (%s)", card.Name, formatColorIdentity(card.ColorIdentity)))
+		}
+		switch card.Legalities.Commander {
+		case scryfall.LegalityBanned:
+			banned = append(banned, card.Name+" (banned)")
+		case scryfall.LegalityNotLegal:
+			banned = append(banned, card.Name+" (not legal in Commander)")
+		case scryfall.LegalityLegal, scryfall.LegalityRestricted:
+		}
+	}
+
+	r.list("Color Identity", "Every card is within the commander's color identity", offColor)
+	r.list("Banned List", "No banned or illegal cards", banned)
+	r.list("Card Names", "Every card was found on Scryfall", unknown)
+}
+
+// verdict ends the report with a one-line summary.
+func (r *deckReport) verdict() {
+	if r.problems == 0 {
+		r.out.WriteString("\n**Result:** ✅ The deck passes every check.\n")
+		return
+	}
+	r.printf("\n**Result:** ❌ Found %d problem area(s); see above.\n", r.problems)
+}
+
+// parseDecklistString converts a decklist from JSON or text format to card names.
+func parseDecklistString(decklistStr string) []string {
+	var cardNames []string
+
+	if unmarshalErr := json.Unmarshal([]byte(decklistStr), &cardNames); unmarshalErr != nil {
+		cardNames = parseTextDecklist(decklistStr)
+	}
+
+	return cardNames
+}
+
+// parseTextDecklist parses a text-format decklist into card names.
+// Supports grouped quantities (e.g., "9 Plains" produces 9 entries).
+func parseTextDecklist(decklistStr string) []string {
+	var cardNames []string
+	lines := strings.SplitSeq(decklistStr, "\n")
+
+	for line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, qty := parseCardLine(line)
+		for range qty {
+			cardNames = append(cardNames, name)
+		}
+	}
+
+	return cardNames
+}
+
+// parseCardLine extracts card name and quantity from a line (e.g., "4 Lightning Bolt" -> ("Lightning Bolt", 4)).
+func parseCardLine(line string) (string, int) {
+	parts := strings.SplitN(line, " ", defaultSplitLimit)
+	if len(parts) != defaultSplitLimit {
+		return line, 1
+	}
+
+	var qty int
+	if _, scanErr := fmt.Sscanf(parts[0], "%d", &qty); scanErr == nil && qty > 0 {
+		return strings.TrimSpace(parts[1]), qty
+	}
+
+	return line, 1
+}
+
+const (
+	exchangeRateURL = "https://api.frankfurter.app/latest?from=USD&to=BRL"
+	// fallbackUSDToBRL is used when the live rate cannot be fetched; the output says so.
+	fallbackUSDToBRL = 5.40
+)
+
+// httpGetter performs an HTTP GET; httpx.Get satisfies it in production, and a stub satisfies it in tests.
+type httpGetter func(ctx context.Context, rawURL string) (*http.Response, error)
+
+// getUSDToBRLRate fetches the current USD to BRL exchange rate.
+func getUSDToBRLRate(ctx context.Context) (float64, error) {
+	return getExchangeRate(ctx, exchangeRateURL, httpx.Get)
+}
+
+// getExchangeRate fetches and decodes the USD to BRL rate from the given URL using the provided getter.
+func getExchangeRate(ctx context.Context, rawURL string, get httpGetter) (float64, error) {
+	resp, err := get(ctx, rawURL)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, &httpx.StatusError{Source: "exchange rate API", StatusCode: resp.StatusCode}
+	}
+
+	var result struct {
+		Rates struct {
+			BRL float64 `json:"BRL"`
+		} `json:"rates"`
+	}
+
+	if decodeErr := json.UnmarshalRead(resp.Body, &result); decodeErr != nil {
+		return 0, fmt.Errorf("decode exchange rate: %w", decodeErr)
+	}
+
+	return result.Rates.BRL, nil
+}
+
+// convertToBRL converts a USD price string to BRL using the given exchange rate. It reports
+// false when the price is not a number, so the caller can omit the conversion rather than
+// show a misleading R$ 0.00.
+func convertToBRL(priceStr string, rate float64) (float64, bool) {
+	price, err := strconv.ParseFloat(strings.TrimSpace(priceStr), 64)
+	if err != nil {
+		return 0, false
+	}
+	return price * rate, true
+}
+
+const (
+	imageSizeSmall      = "small"
+	imageSizeNormal     = "normal"
+	imageSizeLarge      = "large"
+	imageSizePNG        = "png"
+	imageSizeArtCrop    = "art_crop"
+	imageSizeBorderCrop = "border_crop"
+
+	mimeJPEG = "image/jpeg"
+	mimePNG  = "image/png"
+)
+
+// cardImage is a single downloadable card face image.
+type cardImage struct {
+	faceName string
+	url      string
+}
+
+// isValidImageSize reports whether size is a recognized Scryfall image_uris key.
+func isValidImageSize(size string) bool {
+	_, ok := imageURLForSize(scryfall.ImageURIs{}, size)
+
+	return ok
+}
+
+// imageMIMEType returns the MIME type for a Scryfall image size. Only the "png"
+// size is a PNG; every other size is JPEG.
+func imageMIMEType(size string) string {
+	if size == imageSizePNG {
+		return mimePNG
+	}
+
+	return mimeJPEG
+}
+
+// imageURLForSize returns the URL for the requested size and whether size is a
+// recognized image_uris key.
+func imageURLForSize(iu scryfall.ImageURIs, size string) (string, bool) {
+	switch size {
+	case imageSizeSmall:
+		return iu.Small, true
+	case imageSizeNormal:
+		return iu.Normal, true
+	case imageSizeLarge:
+		return iu.Large, true
+	case imageSizePNG:
+		return iu.PNG, true
+	case imageSizeArtCrop:
+		return iu.ArtCrop, true
+	case imageSizeBorderCrop:
+		return iu.BorderCrop, true
+	default:
+		return "", false
+	}
+}
+
+// cardImages returns the downloadable images for a card at the requested size.
+// Single-faced cards yield one image; multi-faced cards (nil top-level ImageURIs)
+// yield one per face. Faces without a URL at that size are skipped.
+func cardImages(card scryfall.Card, size string) []cardImage {
+	images, _ := cardImagesForFace(card, size, "")
+
+	return images
+}
+
+// cardImagesForFace returns a card's downloadable images at the requested size,
+// narrowed to the requested face ("" = all, "front"/"back" = that face). Face
+// selection keys on the card's face order (front, then back) BEFORE filtering by
+// image availability, so a face that lacks an image at this size never shifts the
+// selection. Requesting a back face a card does not have is an error.
+func cardImagesForFace(card scryfall.Card, size, face string) ([]cardImage, error) {
+	if card.ImageURIs != nil {
+		if face == faceBack {
+			return nil, errNoBackFace
+		}
+		if url, ok := imageURLForSize(*card.ImageURIs, size); ok && url != "" {
+			return []cardImage{{faceName: card.Name, url: url}}, nil
+		}
+
+		return nil, nil
+	}
+
+	faces := card.CardFaces
+	switch face {
+	case faceFront:
+		if len(faces) > 0 {
+			faces = faces[:1]
+		}
+	case faceBack:
+		const backFaceIndex = 1
+		if len(faces) <= backFaceIndex {
+			return nil, errNoBackFace
+		}
+		faces = faces[backFaceIndex : backFaceIndex+1]
+	}
+
+	var images []cardImage
+	for _, f := range faces {
+		if url, ok := imageURLForSize(f.ImageURIs, size); ok && url != "" {
+			images = append(images, cardImage{faceName: f.Name, url: url})
+		}
+	}
+
+	return images, nil
+}
+
+// resolveCardForImage resolves the card to render. It first fetches the canonical
+// English printing (also the fallback), then—if a non-English language is
+// requested—looks up a localized printing that has an image, falling back to
+// English when none exists. Returns the chosen card and the language actually used;
+// the error is non-nil only when the English lookup itself fails.
+func (s *Server) resolveCardForImage(
+	ctx context.Context,
+	q imageQuery,
+) (scryfall.Card, scryfall.Lang, error) {
+	// Prefer an explicit printing (set [+ collector number]); fall back to default.
+	if q.set != "" && q.collectorNumber != "" {
+		if card, ok := s.pinnedPrinting(ctx, q); ok {
+			return card, card.Lang, nil
+		}
+	}
+	if q.set != "" {
+		if card, ok := s.setPrinting(ctx, q); ok {
+			return card, card.Lang, nil
+		}
+	}
+
+	englishCard, err := s.scryfallClient.GetCardByName(ctx, q.name, false, scryfall.GetCardByNameOptions{})
+	if err != nil {
+		return scryfall.Card{}, "", fmt.Errorf("look up %q on Scryfall: %w", q.name, err)
+	}
+
+	if q.language == "" || q.language == string(scryfall.LangEnglish) {
+		return englishCard, scryfall.LangEnglish, nil
+	}
+
+	if localized, ok := s.findLocalizedCard(ctx, englishCard.Name, q.language, q.size, ""); ok {
+		return localized, scryfall.Lang(q.language), nil
+	}
+
+	return englishCard, scryfall.LangEnglish, nil
+}
+
+// pinnedPrinting fetches the exact printing for set + collector number (in the
+// requested language when non-English), reporting false to trigger a fallback.
+func (s *Server) pinnedPrinting(ctx context.Context, q imageQuery) (scryfall.Card, bool) {
+	var (
+		card scryfall.Card
+		err  error
+	)
+	if q.language != "" && q.language != string(scryfall.LangEnglish) {
+		card, err = s.scryfallClient.GetCardBySetCodeAndCollectorNumberInLang(
+			ctx, q.set, q.collectorNumber, scryfall.Lang(q.language))
+	} else {
+		card, err = s.scryfallClient.GetCardBySetCodeAndCollectorNumber(ctx, q.set, q.collectorNumber)
+	}
+	if err != nil {
+		logging.Get().Warn().Err(err).Str("tool", "get_card_image").
+			Str(paramSet, q.set).Str(paramCollectorNumber, q.collectorNumber).
+			Msg("Exact printing not found; falling back to default")
+		return scryfall.Card{}, false
+	}
+
+	// A set+collector-number lookup is name-independent, so guard against pinning a
+	// different card than the one requested (e.g. a wrong collector number).
+	if !cardMatchesName(card, q.name) {
+		logging.Get().Warn().Str("tool", "get_card_image").
+			Str(paramName, q.name).Str("printing", card.Name).
+			Msg("Pinned printing does not match the requested name; falling back to default")
+		return scryfall.Card{}, false
+	}
+
+	return card, len(cardImages(card, q.size)) > 0
+}
+
+// cardMatchesName reports whether card is (loosely) the card the user named. The
+// requested name may be fuzzy, so it matches when the printing's full name contains
+// it (case-insensitive) — which also covers "front // back" double-faced names.
+func cardMatchesName(card scryfall.Card, name string) bool {
+	return strings.Contains(strings.ToLower(card.Name), strings.ToLower(strings.TrimSpace(name)))
+}
+
+// setPrinting fetches the named card's printing within a set, preferring the
+// requested language, reporting false to trigger a fallback to the default printing.
+func (s *Server) setPrinting(ctx context.Context, q imageQuery) (scryfall.Card, bool) {
+	base, err := s.scryfallClient.GetCardByName(ctx, q.name, false, scryfall.GetCardByNameOptions{Set: q.set})
+	if err != nil {
+		logging.Get().Warn().Err(err).Str("tool", "get_card_image").
+			Str(paramSet, q.set).Msg("Set printing not found; falling back to default")
+		return scryfall.Card{}, false
+	}
+
+	if q.language != "" && q.language != string(scryfall.LangEnglish) {
+		if localized, ok := s.findLocalizedCard(ctx, base.Name, q.language, q.size, q.set); ok {
+			return localized, true
+		}
+	}
+
+	return base, len(cardImages(base, q.size)) > 0
+}
+
+// findLocalizedCard searches for a printing of the named card in the requested
+// language that has an image at the requested size.
+func (s *Server) findLocalizedCard(
+	ctx context.Context,
+	canonicalName, language, size, set string,
+) (scryfall.Card, bool) {
+	query := fmt.Sprintf(`!"%s" lang:%s`, canonicalName, language)
+	if set != "" {
+		query += " set:" + set
+	}
+
+	result, err := s.scryfallClient.SearchCards(ctx, query, scryfall.SearchCardsOptions{
+		IncludeMultilingual: true,
+	})
+	if err != nil {
+		return scryfall.Card{}, false
+	}
+
+	for _, card := range result.Cards {
+		if len(cardImages(card, size)) > 0 {
+			return card, true
+		}
+	}
+
+	return scryfall.Card{}, false
+}
+
+// fetchCardImageBytes downloads the image at the given HTTPS URL.
+func fetchCardImageBytes(ctx context.Context, rawURL string) ([]byte, error) {
+	return getImageBytes(ctx, rawURL, httpx.Get)
+}
+
+// getImageBytes downloads and reads an image body using the provided getter.
+func getImageBytes(ctx context.Context, rawURL string, get httpGetter) ([]byte, error) {
+	resp, err := get(ctx, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, &httpx.StatusError{Source: "card image download", StatusCode: resp.StatusCode}
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read card image: %w", err)
+	}
+	return body, nil
+}

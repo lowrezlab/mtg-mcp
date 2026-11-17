@@ -5,8 +5,7 @@
 # selectable targets:
 #   * runtime (default) — a tiny distroless image holding just the stdio binary.
 #                         Drive it with `docker run -i --rm` from an MCP client.
-#   * http              — the same binary serving native Streamable HTTP
-#                         (claude.ai connector, hosted deploys such as fly.toml).
+#   * http              — native Streamable HTTP for hosted connectors.
 #   * proxy             — Node + mcp-proxy wrapping the binary to expose the
 #                         stdio server over Streamable HTTP (claude.ai connector).
 # The build context is the repo root; run these from there:
@@ -16,11 +15,11 @@
 # (or just `make docker-build` / `docker compose up`.)
 
 # ---- Builder ----------------------------------------------------------------
-# Pinned to satisfy the `go 1.27.1` directive in go.mod. GOTOOLCHAIN=local turns
+# Pinned to satisfy the `go 1.27.3` directive in go.mod. GOTOOLCHAIN=local turns
 # an unexpected toolchain bump into a hard build failure instead of a silent
 # download. --platform=$BUILDPLATFORM runs the compiler natively (fast) and
 # cross-compiles to TARGETOS/TARGETARCH below, so arm64 hosts get a native image.
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS builder
 ENV GOTOOLCHAIN=local CGO_ENABLED=0
 WORKDIR /src
 
@@ -43,7 +42,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -buildvcs=false \
       -ldflags="-w -s -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
-      -o /out/mtg-mcp -v . \
+      -o /out/mtg-mcp -v ./cmd/mtg-mcp \
  && mkdir -p /out/data
 
 # ---- Proxy target: stdio -> Streamable HTTP via mcp-proxy (needs Node) -------
@@ -56,6 +55,7 @@ RUN apk add --no-cache ca-certificates \
 COPY --from=builder /out/mtg-mcp /usr/local/bin/mtg-mcp
 USER node
 WORKDIR /data
+ENV MTG_MCP_LOG_FILE=/data/mtg-commander-server.log
 EXPOSE 8080
 # DEFAULT (stateful) mode — never pass --stateless: it breaks the MCP Apps
 # tool-call -> resources/read round-trip. Internal port fixed at 8080; remap on
@@ -81,11 +81,13 @@ FROM gcr.io/distroless/static-debian12:nonroot AS runtime
 LABEL org.opencontainers.image.source="https://github.com/nathanmartins/mtg-mcp"
 LABEL org.opencontainers.image.description="MTG Commander MCP server (stdio)"
 COPY --from=builder /out/mtg-mcp /usr/local/bin/mtg-mcp
-# Writable, nonroot-owned CWD for the mandatory mtg-commander-server.log (the app
-# os.Exit(1)s if it can't open it). distroless has no shell to chown at build
-# time, so the dir is created + chowned in the builder stage and copied here.
+# Writable, nonroot-owned /data for mtg-commander-server.log, pointed at via
+# MTG_MCP_LOG_FILE so a mounted volume keeps it (without a writable path the app
+# logs to stderr only). distroless has no shell to chown at build time, so the
+# dir is created + chowned in the builder stage and copied here.
 COPY --from=builder --chown=65532:65532 /out/data /data
 WORKDIR /data
+ENV MTG_MCP_LOG_FILE=/data/mtg-commander-server.log
 # `docker run -i --rm <image>` is then a valid MCP stdio command. Do not add -t:
 # a TTY corrupts JSON-RPC framing. distroless static already ships CA certs.
 ENTRYPOINT ["/usr/local/bin/mtg-mcp"]
