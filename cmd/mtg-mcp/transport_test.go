@@ -272,8 +272,8 @@ func TestHTTPHandlerServesMCPOnSecretPath(t *testing.T) {
 	_, msg := postRPC(t, ts.URL+cfg.endpoint, sessionID, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	result, _ := msg["result"].(map[string]any)
 	tools, _ := result["tools"].([]any)
-	if len(tools) != 20 {
-		t.Errorf("tools/list returned %d tools, want %d", len(tools), 20)
+	if len(tools) != 21 {
+		t.Errorf("tools/list returned %d tools, want %d", len(tools), 21)
 	}
 
 	resp, msg = postRPC(t, ts.URL+cfg.endpoint, sessionID,

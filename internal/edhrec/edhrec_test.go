@@ -2,6 +2,7 @@ package edhrec
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -802,4 +803,144 @@ func TestNewClient(t *testing.T) {
 	if got := NewClient().BaseURL; got != DefaultBaseURL {
 		t.Errorf("NewClient().BaseURL = %q, want %q", got, DefaultBaseURL)
 	}
+}
+
+func TestTopPagePath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		kind, period, want string
+		wantErr            bool
+	}{
+		{kind: TopKindCommanders, period: TopPeriodWeek, want: "commanders/week"},
+		{kind: TopKindCards, period: TopPeriodMonth, want: "top/month"},
+		{kind: TopKindCards, period: TopPeriodYear, want: "top/year"},
+		{kind: "lands", period: TopPeriodWeek, wantErr: true},
+		{kind: TopKindCards, period: "decade", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.kind+"/"+tt.period, func(t *testing.T) {
+			t.Parallel()
+			got, err := TopPagePath(tt.kind, tt.period)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("TopPagePath() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr && !errors.Is(err, errInvalidTopPage) {
+				t.Errorf("TopPagePath() error = %v, want errInvalidTopPage", err)
+			}
+			if got != tt.want {
+				t.Errorf("TopPagePath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetTop(t *testing.T) {
+	t.Parallel()
+
+	t.Run("requests the ranking page", func(t *testing.T) {
+		t.Parallel()
+		var gotPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.URL.Path
+			_ = json.NewEncoder(w).Encode(Response{Header: testTopCommandersHeader})
+		}))
+		defer server.Close()
+
+		page, err := (&Client{BaseURL: server.URL}).GetTop(t.Context(), TopKindCommanders, TopPeriodWeek)
+		if err != nil {
+			t.Fatalf("GetTop() error = %v", err)
+		}
+		if gotPath != "/commanders/week.json" {
+			t.Errorf("requested %q, want /commanders/week.json", gotPath)
+		}
+		if page.Header != testTopCommandersHeader {
+			t.Errorf("header = %q, want %q", page.Header, testTopCommandersHeader)
+		}
+	})
+
+	t.Run("invalid kind makes no request", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			t.Error("GetTop() should not request a page for an invalid kind")
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer server.Close()
+
+		if _, err := (&Client{BaseURL: server.URL}).GetTop(t.Context(), "lands", TopPeriodWeek); err == nil {
+			t.Error("GetTop() error = nil, want an error")
+		}
+	})
+
+	t.Run("403 yields an error", func(t *testing.T) {
+		t.Parallel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer server.Close()
+
+		if _, err := (&Client{BaseURL: server.URL}).GetTop(t.Context(), TopKindCards, TopPeriodYear); err == nil {
+			t.Error("GetTop() error = nil, want an error")
+		}
+	})
+}
+
+func TestFormatTop(t *testing.T) {
+	t.Parallel()
+	page := &Response{
+		Header: "Top Cards (Past Week)",
+		Container: Container{
+			JSONDict: Data{
+				CardLists: []CardList{
+					{Header: "Empty", CardViews: []CardView{}},
+					{
+						Header: testPastWeekHeader,
+						CardViews: []CardView{
+							{Name: testSolRing, NumDecks: 230833, PotentialDecks: 275261},
+							{Name: testJaceArchitect, NumDecks: 2986},
+							{Name: testArcaneSignet, NumDecks: 193741, PotentialDecks: 275261},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("limit, percentages and raw counts", func(t *testing.T) {
+		t.Parallel()
+		got := FormatTop(page, TopKindCards, TopPeriodWeek, 2)
+		for _, want := range []string{
+			"# EDHREC Top Cards (Past Week)",
+			"## " + testPastWeekHeader,
+			"1. **" + testSolRing + "**",
+			"230833 of 275261 (83.9%)",
+			"2. **" + testJaceArchitect + "**",
+			"   - Decks: 2986\n",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("FormatTop() missing %q:\n%s", want, got)
+			}
+		}
+		if strings.Contains(got, testArcaneSignet) {
+			t.Error("FormatTop() with limit 2 should drop the third card")
+		}
+		if strings.Contains(got, "## Empty") {
+			t.Error("FormatTop() should skip empty card lists")
+		}
+	})
+
+	t.Run("zero limit shows everything", func(t *testing.T) {
+		t.Parallel()
+		if got := FormatTop(page, TopKindCards, TopPeriodWeek, 0); !strings.Contains(got, testArcaneSignet) {
+			t.Errorf("FormatTop() with limit 0 should show every card:\n%s", got)
+		}
+	})
+
+	t.Run("empty page", func(t *testing.T) {
+		t.Parallel()
+		got := FormatTop(&Response{}, TopKindCommanders, TopPeriodMonth, 10)
+		if !strings.Contains(got, "# EDHREC Top commanders") || !strings.Contains(got, "No commanders ranked") {
+			t.Errorf("FormatTop() empty-page output:\n%s", got)
+		}
+	})
 }

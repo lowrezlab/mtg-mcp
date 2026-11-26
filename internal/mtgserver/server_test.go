@@ -58,9 +58,9 @@ func TestRegisterToolsAndResources(t *testing.T) {
 	wantTools := []string{
 		"check_commander_legality", "get_archidekt_deck", "get_archidekt_user_decks", "get_banned_list",
 		"get_card_details", "get_card_image", "get_card_price", "get_card_rulings", "get_edhrec_combos",
-		"get_edhrec_recommendations", "get_edhrec_set_cards", "get_glossary_term", "get_moxfield_deck",
-		"get_moxfield_user_decks", "get_rule", "search_archidekt_decks", "search_cards", "search_moxfield_decks",
-		"search_rules", "validate_deck",
+		"get_edhrec_recommendations", "get_edhrec_set_cards", "get_edhrec_top", "get_glossary_term",
+		"get_moxfield_deck", "get_moxfield_user_decks", "get_rule", "search_archidekt_decks", "search_cards",
+		"search_moxfield_decks", "search_rules", "validate_deck",
 	}
 	if got := slices.Sorted(maps.Keys(mcpServer.ListTools())); !slices.Equal(got, wantTools) {
 		t.Errorf("registered tools = %v\nwant %v", got, wantTools)

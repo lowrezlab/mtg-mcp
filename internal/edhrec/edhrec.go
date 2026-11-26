@@ -1,5 +1,6 @@
 // Package edhrec is a client for EDHREC's undocumented JSON pages: commander recommendations,
-// color-combination combos and set cards, plus the Markdown rendering of each.
+// color-combination combos, set cards and the week/month/year rankings, plus the Markdown
+// rendering of each.
 package edhrec
 
 import (
@@ -16,6 +17,9 @@ import (
 // errInvalidColors reports a combo color string that is neither WUBRG letters nor a page name.
 var errInvalidColors = errors.New("invalid colors")
 
+// errInvalidTopPage reports a ranking kind or period EDHREC has no page for.
+var errInvalidTopPage = errors.New("invalid ranking")
+
 const (
 	// DefaultBaseURL is the live EDHREC JSON pages endpoint.
 	DefaultBaseURL       = "https://json.edhrec.com/pages"
@@ -29,6 +33,22 @@ const (
 	DefaultLimit = 10
 	// DefaultSetCardsLimit is the default number of cards shown per set-cards list.
 	DefaultSetCardsLimit = 25
+	// DefaultTopLimit is the default number of entries shown from a ranking page.
+	DefaultTopLimit = 25
+)
+
+// Ranking kinds and periods GetTop accepts. Each kind/period pair is one EDHREC page.
+const (
+	// TopKindCommanders ranks commanders by decks built (commanders/<period>.json).
+	TopKindCommanders = "commanders"
+	// TopKindCards ranks cards by inclusion rate (top/<period>.json).
+	TopKindCards = "cards"
+	// TopPeriodWeek ranks over the past week.
+	TopPeriodWeek = "week"
+	// TopPeriodMonth ranks over the past month.
+	TopPeriodMonth = "month"
+	// TopPeriodYear ranks over the past year. EDHREC labels its commanders/year list "Past 2 Years".
+	TopPeriodYear = "year"
 )
 
 // Response represents the top-level response structure.
@@ -263,6 +283,45 @@ func (c *Client) GetSetCards(ctx context.Context, setCode string) (*Response, er
 	return &page, nil
 }
 
+// TopPagePath returns the EDHREC page path for a ranking kind and period, e.g. "commanders/week".
+// Only the unpaged form exists: top/week--1.json answers 403.
+func TopPagePath(kind, period string) (string, error) {
+	var prefix string
+	switch kind {
+	case TopKindCommanders:
+		prefix = "commanders"
+	case TopKindCards:
+		prefix = "top"
+	default:
+		return "", fmt.Errorf("%w kind %q: use %q or %q", errInvalidTopPage, kind, TopKindCommanders, TopKindCards)
+	}
+
+	switch period {
+	case TopPeriodWeek, TopPeriodMonth, TopPeriodYear:
+	default:
+		return "", fmt.Errorf("%w period %q: use %q, %q or %q",
+			errInvalidTopPage, period, TopPeriodWeek, TopPeriodMonth, TopPeriodYear)
+	}
+
+	return prefix + "/" + period, nil
+}
+
+// GetTop fetches the EDHREC ranking page for kind over period (see TopPagePath).
+func (c *Client) GetTop(ctx context.Context, kind, period string) (*Response, error) {
+	pagePath, err := TopPagePath(kind, period)
+	if err != nil {
+		return nil, err
+	}
+
+	var page Response
+	err = fetchEDHRECPage(ctx, c.BaseURL+"/"+pagePath+".json", "top "+kind, &page)
+	if err != nil {
+		return nil, err
+	}
+
+	return &page, nil
+}
+
 // topThemes returns the highest-count themes, capped at maxThemesListed, plus the number
 // omitted. tag_counts arrives sorted by count descending.
 func topThemes(tags []TagCount) ([]TagCount, int) {
@@ -473,6 +532,46 @@ func FormatSetCards(page *Response, setCode string, limit int) string {
 		if len(cardList.CardViews) > count {
 			_, _ = fmt.Fprintf(&output, "*...and %d more cards*\n\n", len(cardList.CardViews)-count)
 		}
+	}
+
+	return output.String()
+}
+
+// FormatTop formats an EDHREC ranking page. Card rankings carry potential_decks, so they print an
+// inclusion rate; commander rankings print the raw deck count. limit <= 0 shows everything.
+func FormatTop(page *Response, kind, period string, limit int) string {
+	var output strings.Builder
+
+	title := page.Header
+	if title == "" {
+		title = "Top " + kind
+	}
+	_, _ = fmt.Fprintf(&output, "# EDHREC %s\n\n", title)
+
+	shown := 0
+	for _, cardList := range page.Container.JSONDict.CardLists {
+		if len(cardList.CardViews) == 0 {
+			continue
+		}
+
+		_, _ = fmt.Fprintf(&output, "## %s\n\n", cardList.Header)
+
+		count := len(cardList.CardViews)
+		if limit > 0 && count > limit {
+			count = limit
+		}
+
+		for i := range count {
+			card := cardList.CardViews[i]
+			_, _ = fmt.Fprintf(&output, "%d. **%s**\n", i+1, card.Name)
+			writeCardDeckStats(&output, card.NumDecks, card.PotentialDecks)
+			output.WriteString("\n")
+		}
+		shown += count
+	}
+
+	if shown == 0 {
+		_, _ = fmt.Fprintf(&output, "No %s ranked for the past %s.\n", kind, period)
 	}
 
 	return output.String()

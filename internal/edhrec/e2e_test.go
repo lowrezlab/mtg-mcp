@@ -253,3 +253,25 @@ func TestEDHRECSetCardsE2E(t *testing.T) {
 		t.Errorf("set output must never contain NaN, got:\n%s", output)
 	}
 }
+
+// TestEDHRECTopE2E fetches every live ranking page get_edhrec_top exposes.
+func TestEDHRECTopE2E(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	client := NewClient()
+	for _, kind := range []string{TopKindCommanders, TopKindCards} {
+		for _, period := range []string{TopPeriodWeek, TopPeriodMonth, TopPeriodYear} {
+			page, err := client.GetTop(ctx, kind, period)
+			if err != nil {
+				t.Errorf("GetTop(%s, %s) failed: %v", kind, period, err)
+
+				continue
+			}
+
+			if output := FormatTop(page, kind, period, 5); !strings.Contains(output, "1. **") {
+				t.Errorf("GetTop(%s, %s): expected ranked entries, got:\n%s", kind, period, output)
+			}
+		}
+	}
+}
