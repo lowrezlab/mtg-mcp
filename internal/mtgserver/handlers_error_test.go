@@ -95,4 +95,20 @@ func TestEDHRECHandlerValidation(t *testing.T) {
 			t.Error("expected error for missing colors")
 		}
 	})
+
+	for name, args := range map[string]map[string]any{
+		"top unknown kind":    {paramKind: "lands"},
+		"top unknown period":  {paramPeriod: "decade"},
+		"top empty kind":      {paramKind: ""},
+		"top non-string kind": {paramKind: 3.0},
+		"top negative limit":  {argLimit: -1.0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			res, _ := s.handleGetEDHRECTop(ctx, toolRequest(args))
+			if !res.IsError {
+				t.Errorf("expected error for %v", args)
+			}
+		})
+	}
 }

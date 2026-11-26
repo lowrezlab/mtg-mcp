@@ -186,3 +186,55 @@ func (s *Server) handleGetEDHRECSetCards(
 
 	return mcp.NewToolResultText(edhrec.FormatSetCards(page, code, limit)), nil
 }
+
+func (s *Server) handleGetEDHRECTop(
+	ctx context.Context,
+	request mcp.CallToolRequest,
+) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+
+	kind, err := enumArg(args, paramKind, edhrec.TopKindCommanders)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	period, err := enumArg(args, paramPeriod, edhrec.TopPeriodWeek)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	period = strings.ToLower(strings.TrimSpace(period))
+
+	// Reject a bad kind or period before any request goes out.
+	if _, err = edhrec.TopPagePath(kind, period); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	// 0 means no limit for the EDHREC tools.
+	limit, err := cappedIntArg(args, "limit", edhrec.DefaultTopLimit, 0, math.MaxInt32)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	logging.Get().Info().
+		Str("tool", "get_edhrec_top").
+		Str(paramKind, kind).
+		Str(paramPeriod, period).
+		Int("limit", limit).
+		Msg("Fetching EDHREC top rankings")
+
+	page, err := s.edhrec.GetTop(ctx, kind, period)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"Failed to fetch EDHREC top %s for the past %s: %v", kind, period, err,
+		)), nil
+	}
+
+	logging.Get().Info().
+		Str("tool", "get_edhrec_top").
+		Str(paramKind, kind).
+		Str(paramPeriod, period).
+		Int("card_lists", len(page.Container.JSONDict.CardLists)).
+		Msg("Successfully fetched EDHREC top rankings")
+
+	return mcp.NewToolResultText(edhrec.FormatTop(page, kind, period, limit)), nil
+}

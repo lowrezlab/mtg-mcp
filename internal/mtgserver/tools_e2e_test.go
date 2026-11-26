@@ -69,6 +69,7 @@ func toolE2ECases() map[string]toolE2ECase {
 		// Letters, not a page name: checks the WUBRG mapping against the live pages.
 		"get_edhrec_combos":    {map[string]any{argColors: "uw", argLimit: 3.0}, []string{"Popular Combos"}},
 		"get_edhrec_set_cards": {map[string]any{paramSet: "blb", argLimit: 3.0}, []string{"EDHREC Set Overview"}},
+		"get_edhrec_top":       {map[string]any{paramPeriod: "week", argLimit: 3.0}, []string{"EDHREC Top Commanders"}},
 	}
 }
 
