@@ -66,6 +66,7 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/pulls" \
             -f base=main \
             -f head="${UPSTREAM_OWNER}:main" \
+            -F maintainer_can_modify=false \
             -f title="Sync upstream ${UPSTREAM_REPO}" \
             -f body="${body}" \
             --jq .html_url

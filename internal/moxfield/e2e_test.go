@@ -1,0 +1,253 @@
+//go:build e2e
+
+package moxfield
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestMoxfieldGetDeckE2E tests fetching a real deck from Moxfield.
+func TestMoxfieldGetDeckE2E(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	// First search for a valid deck
+	searchParams := SearchParams{
+		CardName:      testAtraxa,
+		Format:        testFormatCommander,
+		SortType:      testSortUpdated,
+		SortDirection: DirectionDescending,
+		PageSize:      1,
+		PageNumber:    1,
+	}
+
+	searchResp, err := NewClient().SearchDecks(ctx, searchParams)
+	if err != nil {
+		t.Fatalf("SearchDecks() failed: %v", err)
+	}
+
+	if len(searchResp.Data) == 0 {
+		t.Skip("No decks found to test with")
+		return
+	}
+
+	publicID := searchResp.Data[0].PublicID
+
+	deck, err := NewClient().GetDeck(ctx, publicID)
+	if err != nil {
+		t.Fatalf("GetDeck() failed: %v", err)
+	}
+
+	// Verify deck structure
+	if deck.Name == "" {
+		t.Error("Expected deck name to be populated")
+	}
+
+	if deck.Format == "" {
+		t.Error("Expected deck format to be populated")
+	}
+
+	if len(deck.Mainboard) == 0 {
+		t.Error("Expected mainboard to have cards")
+	}
+
+	// Verify card structure
+	for _, entry := range deck.Mainboard {
+		if entry.Card.Name == "" {
+			t.Error("Expected card to have a name")
+		}
+		if entry.Quantity <= 0 {
+			t.Error("Expected quantity to be positive")
+		}
+		break // Just check first card
+	}
+
+	t.Logf("✓ Successfully fetched deck: %s (Format: %s)", deck.Name, deck.Format)
+}
+
+// TestMoxfieldGetUserDecksE2E tests fetching user decks from Moxfield.
+func TestMoxfieldGetUserDecksE2E(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	// Use a known public user with decks
+	// Note: This user might not exist, so we'll search for a deck owner first
+	searchParams := SearchParams{
+		CardName:      testAtraxa,
+		Format:        testFormatCommander,
+		SortType:      testSortUpdated,
+		SortDirection: DirectionDescending,
+		PageSize:      1,
+		PageNumber:    1,
+	}
+
+	searchResp, searchErr := NewClient().SearchDecks(ctx, searchParams)
+	if searchErr != nil {
+		t.Fatalf("SearchDecks() failed: %v", searchErr)
+	}
+
+	if len(searchResp.Data) == 0 {
+		t.Skip("No decks found to extract username from")
+		return
+	}
+
+	// Search results carry no usernames, but a deck read does: take the deck's author and
+	// list their decks, which must include the deck we started from.
+	deck, err := NewClient().GetDeck(ctx, searchResp.Data[0].PublicID)
+	if err != nil {
+		t.Fatalf("GetDeck() failed: %v", err)
+	}
+	authors := authorNames(deck.Authors)
+	if len(authors) == 0 {
+		t.Fatalf("deck %s lists no author usernames: %v", deck.PublicID, deck.Authors)
+	}
+
+	decks, err := NewClient().GetUserDecks(ctx, authors[0], 100)
+	if err != nil {
+		t.Fatalf("GetUserDecks(%q) failed: %v", authors[0], err)
+	}
+	found := false
+	for _, d := range decks.Data {
+		found = found || d.PublicID == deck.PublicID
+	}
+	if !found {
+		t.Errorf("GetUserDecks(%q) returned %d decks without %s", authors[0], len(decks.Data), deck.PublicID)
+	}
+	t.Logf("✓ %s has %d public decks", authors[0], decks.TotalResults)
+}
+
+// TestMoxfieldSearchDecksE2E tests searching for decks on Moxfield.
+func TestMoxfieldSearchDecksE2E(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	// Search for a popular commander
+	params := SearchParams{
+		CardName:      testAtraxa,
+		Format:        testFormatCommander,
+		SortType:      testSortUpdated,
+		SortDirection: DirectionDescending,
+		PageSize:      5,
+		PageNumber:    1,
+	}
+
+	response, err := NewClient().SearchDecks(ctx, params)
+	if err != nil {
+		t.Fatalf("SearchDecks() failed: %v", err)
+	}
+
+	// Verify response structure
+	if response.PageNumber != 1 {
+		t.Errorf("Expected page number 1, got %d", response.PageNumber)
+	}
+
+	if response.PageSize <= 0 {
+		t.Error("Expected page size to be positive")
+	}
+
+	// Verify we got some results
+	if len(response.Data) == 0 {
+		t.Error("Expected to find at least one deck for Atraxa")
+	}
+
+	// Verify deck structure
+	if len(response.Data) > 0 {
+		deck := response.Data[0]
+		if deck.Name == "" {
+			t.Error("Expected deck to have a name")
+		}
+		if deck.PublicID == "" {
+			t.Error("Expected deck to have a public ID")
+		}
+
+		t.Logf("✓ Successfully found %d decks containing '%s'", len(response.Data), params.CardName)
+	}
+}
+
+// TestMoxfieldExtractPublicIDE2E tests extracting public IDs from URLs.
+func TestMoxfieldExtractPublicIDE2E(t *testing.T) {
+	testCases := []struct {
+		name     string
+		url      string
+		expected string
+	}{
+		{
+			name:     "full URL",
+			url:      "https://www.moxfield.com/decks/6HxHcsIL70W0wT0xGHbRqw",
+			expected: testPublicID,
+		},
+		{
+			name:     "just ID",
+			url:      testPublicID,
+			expected: testPublicID,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ExtractPublicID(tc.url)
+			if got != tc.expected {
+				t.Errorf("ExtractPublicID(%q) = %q, want %q", tc.url, got, tc.expected)
+			}
+		})
+	}
+
+	t.Log("✓ Successfully extracted public IDs from URLs")
+}
+
+// TestMoxfieldFormatDeckE2E tests formatting a real deck.
+func TestMoxfieldFormatDeckE2E(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	// First search for a valid deck
+	searchParams := SearchParams{
+		CardName:      testAtraxa,
+		Format:        testFormatCommander,
+		SortType:      testSortUpdated,
+		SortDirection: DirectionDescending,
+		PageSize:      1,
+		PageNumber:    1,
+	}
+
+	searchResp, err := NewClient().SearchDecks(ctx, searchParams)
+	if err != nil {
+		t.Fatalf("SearchDecks() failed: %v", err)
+	}
+
+	if len(searchResp.Data) == 0 {
+		t.Skip("No decks found to test with")
+		return
+	}
+
+	publicID := searchResp.Data[0].PublicID
+
+	deck, err := NewClient().GetDeck(ctx, publicID)
+	if err != nil {
+		t.Fatalf("GetDeck() failed: %v", err)
+	}
+
+	// Format the deck
+	output := FormatDeck(deck)
+	if output == "" {
+		t.Error("Expected non-empty formatted output")
+	}
+
+	// Verify output contains expected sections
+	expectedStrings := []string{
+		deck.Name,
+		"Format:",
+		"Mainboard",
+	}
+
+	for _, expected := range expectedStrings {
+		if !strings.Contains(output, expected) {
+			t.Errorf("Expected output to contain %q", expected)
+		}
+	}
+
+	t.Logf("✓ Successfully formatted deck: %s", deck.Name)
+}
